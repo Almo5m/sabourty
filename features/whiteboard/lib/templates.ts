@@ -48,7 +48,6 @@ export const TEMPLATES: TemplateInfo[] = [
   },
 ];
 
-// نفس ألوان هوية التطبيق (app/globals.css) بدل الألوان الجاهزة القديمة
 const TOKEN = {
   accent: "#1f6f63",
   accentSoft: "#e3efec",
@@ -72,6 +71,11 @@ function tagObject(obj: fabric.Object, name: string) {
   anyObj.name = name;
 }
 
+/**
+ * عقدة = مستطيل + نص، ككائنين مستقلّين على مستوى اللوحة (بدون تجميع Group)
+ * حتى تبقى الكتابة داخل النص تعمل بشكل طبيعي عبر آلية فابريك الأصلية
+ * للنقر المزدوج على النص (وهي آلية لا تعمل مع نص متداخل داخل مجموعة).
+ */
 function createNode(
   text: string,
   left: number,
@@ -80,36 +84,35 @@ function createNode(
   height: number,
   variant: Variant,
   name = "عقدة"
-) {
+): [fabric.Rect, fabric.Textbox] {
   const style = VARIANT_STYLE[variant];
-  const group = new fabric.Group(
-    [
-      new fabric.Rect({
-        width,
-        height,
-        fill: style.fill,
-        rx: 12,
-        ry: 12,
-        shadow: new fabric.Shadow({
-          color: "rgba(33, 31, 26, 0.12)",
-          blur: 6,
-          offsetY: 2,
-        }),
-      }),
-      new fabric.Textbox(text, {
-        left: 10,
-        top: height / 2 - 10,
-        width: width - 20,
-        fontSize: 14,
-        fill: style.text,
-        textAlign: "center",
-        fontFamily: "inherit",
-      }),
-    ],
-    { left, top }
-  );
-  tagObject(group, name);
-  return group;
+  const rect = new fabric.Rect({
+    left,
+    top,
+    width,
+    height,
+    fill: style.fill,
+    rx: 14,
+    ry: 14,
+    stroke: "rgba(33, 31, 26, 0.06)",
+    strokeWidth: 1,
+    shadow: new fabric.Shadow({
+      color: "rgba(33, 31, 26, 0.12)",
+      blur: 7,
+      offsetY: 2,
+    }),
+  });
+  const textbox = new fabric.Textbox(text, {
+    left: left + 10,
+    top: top + height / 2 - 10,
+    width: width - 20,
+    fontSize: 14,
+    fill: style.text,
+    textAlign: "center",
+  });
+  tagObject(rect, name);
+  tagObject(textbox, `${name} (نص)`);
+  return [rect, textbox];
 }
 
 function createCircle(x: number, y: number, radius: number, variant: Variant) {
@@ -135,6 +138,22 @@ function createLine(x1: number, y1: number, x2: number, y2: number) {
   return line;
 }
 
+/** منحنى رابط ناعم (بدل خط مستقيم) — يُستخدم في الخريطة الذهنية الكلاسيكية. */
+function createCurve(x1: number, y1: number, x2: number, y2: number) {
+  const midX = (x1 + x2) / 2;
+  const midY = (y1 + y2) / 2;
+  const path = new fabric.Path(
+    `M ${x1} ${y1} Q ${midX} ${y1} ${midX} ${midY} Q ${midX} ${y2} ${x2} ${y2}`,
+    {
+      stroke: TOKEN.line,
+      strokeWidth: 2,
+      fill: "",
+    }
+  );
+  tagObject(path, "خط ربط");
+  return path;
+}
+
 export function buildTemplate(
   id: TemplateId,
   cx: number,
@@ -158,33 +177,34 @@ export function buildTemplate(
 
 function buildMindmap(cx: number, cy: number): fabric.Object[] {
   const objects: fabric.Object[] = [];
-  const centerNode = createNode(
-    "الفكرة الرئيسية",
-    cx - 75,
-    cy - 30,
-    150,
-    60,
-    "accent",
-    "الفكرة المركزية"
-  );
-
   const count = 6;
   const radius = 220;
   const subNodes: { x: number; y: number }[] = [];
   for (let i = 0; i < count; i++) {
     const angle = (Math.PI * 2 * i) / count - Math.PI / 2;
-    const sx = cx + radius * Math.cos(angle);
-    const sy = cy + radius * Math.sin(angle);
-    subNodes.push({ x: sx, y: sy });
+    subNodes.push({
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle),
+    });
   }
 
   subNodes.forEach((p) => {
-    objects.push(createLine(cx, cy, p.x, p.y));
+    objects.push(createCurve(cx, cy, p.x, p.y));
   });
-  objects.push(centerNode);
+  objects.push(
+    ...createNode(
+      "الفكرة الرئيسية",
+      cx - 75,
+      cy - 30,
+      150,
+      60,
+      "accent",
+      "الفكرة المركزية"
+    )
+  );
   subNodes.forEach((p, i) => {
     objects.push(
-      createNode(`فكرة فرعية ${i + 1}`, p.x - 60, p.y - 25, 120, 50, "soft")
+      ...createNode(`فكرة فرعية ${i + 1}`, p.x - 60, p.y - 25, 120, 50, "soft")
     );
   });
 
@@ -206,24 +226,21 @@ function buildOrgChart(cx: number, cy: number): fabric.Object[] {
   const leafH = 46;
 
   midXs.forEach((mx) => {
-    objects.push(
-      createLine(cx, rootTop + root.h, mx + midW / 2, midY)
-    );
+    objects.push(createLine(cx, rootTop + root.h, mx + midW / 2, midY));
   });
-
   midXs.forEach((mx) => {
     objects.push(createLine(mx + midW / 2, midY + midH, mx + midW / 2, leafY));
   });
 
   objects.push(
-    createNode("الإدارة العليا", root.left, root.top, root.w, root.h, "accent")
+    ...createNode("الإدارة العليا", root.left, root.top, root.w, root.h, "accent")
   );
   midXs.forEach((mx, i) => {
-    objects.push(createNode(`قسم ${i + 1}`, mx, midY, midW, midH, "soft"));
+    objects.push(...createNode(`قسم ${i + 1}`, mx, midY, midW, midH, "soft"));
   });
   midXs.forEach((mx, i) => {
     objects.push(
-      createNode(
+      ...createNode(
         `فريق ${i + 1}`,
         mx + midW / 2 - leafW / 2,
         leafY,
@@ -255,7 +272,7 @@ function buildTimeline(cx: number, cy: number): fabric.Object[] {
     objects.push(createLine(x, cy, x, above ? cy - 44 : cy + 44));
     objects.push(createCircle(x, cy, 9, "accent"));
     objects.push(
-      createNode(`الحدث ${i + 1}`, x - nodeW / 2, labelY, nodeW, nodeH, "soft")
+      ...createNode(`الحدث ${i + 1}`, x - nodeW / 2, labelY, nodeW, nodeH, "soft")
     );
   }
 
@@ -271,7 +288,7 @@ function buildFishbone(cx: number, cy: number): fabric.Object[] {
 
   objects.push(createLine(spineStart, cy, spineEnd, cy));
   objects.push(
-    createNode("النتيجة", spineEnd, cy - resultH / 2, resultW, resultH, "amber")
+    ...createNode("النتيجة", spineEnd, cy - resultH / 2, resultW, resultH, "amber")
   );
 
   const boneCount = 6;
@@ -287,7 +304,7 @@ function buildFishbone(cx: number, cy: number): fabric.Object[] {
 
     objects.push(createLine(x, cy, targetX, targetY));
     objects.push(
-      createNode(
+      ...createNode(
         `سبب ${i + 1}`,
         targetX - labelW / 2,
         up ? targetY - labelH - 4 : targetY + 4,
@@ -324,14 +341,7 @@ function buildFlowchart(cx: number, cy: number): fabric.Object[] {
 
   steps.forEach((label, i) => {
     objects.push(
-      createNode(
-        label,
-        positions[i].left,
-        positions[i].top,
-        nodeW,
-        nodeH,
-        variants[i]
-      )
+      ...createNode(label, positions[i].left, positions[i].top, nodeW, nodeH, variants[i])
     );
   });
 

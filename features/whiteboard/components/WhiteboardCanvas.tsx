@@ -15,7 +15,7 @@ import { TemplatesPanel } from "./TemplatesPanel";
 import { VideoExportModal } from "./VideoExportModal";
 import { saveBoard } from "@/features/boards/lib/boardStorage";
 import { BoardData, BoardMode, PdfPageState } from "@/features/boards/types";
-import { exportPagesAsPdf, importPdfPages } from "../lib/pdf";
+import { exportPagesAsPdf, importPdfPages, PdfImportError } from "../lib/pdf";
 import { buildTemplate, TEMPLATES, TemplateId } from "../lib/templates";
 import {
   downloadBlob,
@@ -34,6 +34,10 @@ const EXTRA_PROPS = [
   "name",
   "locked",
   "kind",
+  "groupTag",
+  "groupLabel",
+  "groupIcon",
+  "groupedByUser",
   "audioNoteId",
   "audioDurationSeconds",
   "audioRecordedAt",
@@ -78,34 +82,28 @@ const KIND_MAP: Record<ToolType, IconName> = {
   star: "star",
 };
 
-/** يبحث بعمق داخل الكائنات (حتى المتداخلة في مجموعات) عن مربع نص عند نقطة معيّنة. */
-function findTextboxAtPoint(
-  obj: fabric.Object,
-  point: fabric.Point
-): fabric.Textbox | null {
-  if (obj.type === "textbox" && obj.containsPoint(point)) {
-    return obj as fabric.Textbox;
-  }
-  if (obj.type === "group") {
-    const children = (obj as fabric.Group).getObjects();
-    for (let i = children.length - 1; i >= 0; i--) {
-      const found = findTextboxAtPoint(children[i], point);
-      if (found) return found;
-    }
-  }
-  return null;
+/** يستخرج إحداثيات المؤشر من حدث فأرة أو لمس. */
+function getClientXY(e: Event): { x: number; y: number } {
+  const touchEvent = e as unknown as TouchEvent;
+  const touch = touchEvent.touches?.[0] ?? touchEvent.changedTouches?.[0];
+  if (touch) return { x: touch.clientX, y: touch.clientY };
+  const mouseEvent = e as MouseEvent;
+  return { x: mouseEvent.clientX, y: mouseEvent.clientY };
 }
 
-/** يربط كل مربعات النص المتداخلة داخل عنصر (مجموعة) بحدث نهاية التحرير. */
-function attachNestedTextEditing(obj: fabric.Object, onExit: () => void) {
-  if (obj.type !== "group") return;
-  (obj as fabric.Group).getObjects().forEach((child) => {
-    if (child.type === "textbox") {
-      (child as fabric.Textbox).on("editing:exited", onExit);
-    } else if (child.type === "group") {
-      attachNestedTextEditing(child, onExit);
-    }
-  });
+/** عناصر محمية من الممحاة: الملاحظات الصوتية، الملاحظات اللاصقة، وكل عناصر القوالب. */
+function isEraseProtected(obj: fabric.Object): boolean {
+  const anyObj = obj as fabric.Object & {
+    kind?: IconName;
+    groupTag?: string;
+    audioNoteId?: string;
+  };
+  return (
+    Boolean(anyObj.groupTag) ||
+    Boolean(anyObj.audioNoteId) ||
+    anyObj.kind === "voice" ||
+    anyObj.kind === "sticky"
+  );
 }
 
 /** يحوّل تحديدًا متعددًا (ActiveSelection) إلى مجموعة دائمة واحدة، ويعيد المجموعة الجديدة. */
@@ -138,13 +136,40 @@ function ungroupSelection(canvas: fabric.Canvas) {
 }
 
 /** يصعد سلسلة المجموعات الأصل لإيجاد أقرب عنصر له معرّف طبقة. */
+/** يحدد معرّف الطبقة الذي يجب تمييزه في لوحة الطبقات عن عنصر محدَّد (مفرد أو متعدد). */
 function resolveLayerId(obj: fabric.Object | null | undefined): string | null {
-  let current = obj as (fabric.Object & { id?: string; group?: fabric.Object }) | null | undefined;
+  type Tagged = fabric.Object & {
+    id?: string;
+    group?: fabric.Object;
+    groupTag?: string;
+  };
+
+  if (!obj) return null;
+
+  if (obj.type === "activeselection") {
+    const members = (obj as fabric.ActiveSelection).getObjects() as Tagged[];
+    const tags = new Set(members.map((m) => m.groupTag).filter(Boolean));
+    if (tags.size === 1) return [...tags][0] as string;
+    return null;
+  }
+
+  let current: Tagged | null | undefined = obj as Tagged;
   while (current) {
+    if (current.groupTag) return current.groupTag;
     if (current.id) return current.id;
-    current = current.group as typeof current;
+    current = current.group as Tagged | undefined;
   }
   return null;
+}
+
+/** يعيد كل الكائنات المرتبطة بمعرّف طبقة: أعضاء مجموعة وهمية (groupTag) أو كائن واحد. */
+function getLayerObjects(canvas: fabric.Canvas, id: string): fabric.Object[] {
+  type Tagged = fabric.Object & { id?: string; groupTag?: string };
+  const all = canvas.getObjects() as Tagged[];
+  const grouped = all.filter((o) => o.groupTag === id);
+  if (grouped.length > 0) return grouped;
+  const single = all.find((o) => o.id === id);
+  return single ? [single] : [];
 }
 
 async function renderPageOffscreen(page: PdfPageState): Promise<string> {
@@ -187,6 +212,19 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [layersOpen, setLayersOpen] = useState(true);
   const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  const [eraserCursor, setEraserCursor] = useState<{
+    x: number;
+    y: number;
+    visible: boolean;
+  }>({ x: 0, y: 0, visible: false });
+  const isErasingRef = useRef(false);
+  const erasedAnyRef = useRef(false);
+  const [pdfImporting, setPdfImporting] = useState(false);
 
   const [videoModalOpen, setVideoModalOpen] = useState(false);
   const [videoStatus, setVideoStatus] = useState<
@@ -243,23 +281,56 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     () => () => {
       const canvas = fabricRef.current;
       if (!canvas) return;
-      const items: LayerItem[] = canvas.getObjects().map((obj) => {
-        const anyObj = obj as fabric.Object & {
-          id?: string;
-          name?: string;
-          locked?: boolean;
-          kind?: IconName;
-        };
-        return {
-          id: anyObj.id ?? "",
-          name: anyObj.name ?? "عنصر",
+
+      type Tagged = fabric.Object & {
+        id?: string;
+        name?: string;
+        locked?: boolean;
+        kind?: IconName;
+        groupTag?: string;
+        groupLabel?: string;
+        groupIcon?: IconName;
+      };
+
+      const byId = new Map<string, LayerItem>();
+      const order: string[] = [];
+
+      canvas.getObjects().forEach((raw) => {
+        const obj = raw as Tagged;
+
+        if (obj.groupTag) {
+          const key = obj.groupTag;
+          const existing = byId.get(key);
+          if (!existing) {
+            byId.set(key, {
+              id: key,
+              name: obj.groupLabel ?? "مجموعة",
+              type: "group",
+              icon: obj.groupIcon ?? "templates",
+              visible: obj.visible !== false,
+              locked: Boolean(obj.locked),
+            });
+            order.push(key);
+          } else {
+            if (obj.visible !== false) existing.visible = true;
+            if (!obj.locked) existing.locked = false;
+          }
+          return;
+        }
+
+        const key = obj.id ?? crypto.randomUUID();
+        byId.set(key, {
+          id: key,
+          name: obj.name ?? "عنصر",
           type: obj.type ?? "object",
-          icon: anyObj.kind ?? "select",
+          icon: obj.kind ?? "select",
           visible: obj.visible !== false,
-          locked: Boolean(anyObj.locked),
-        };
+          locked: Boolean(obj.locked),
+        });
+        order.push(key);
       });
-      setLayers(items);
+
+      setLayers(order.map((id) => byId.get(id) as LayerItem));
     },
     []
   );
@@ -418,20 +489,42 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       anyObj.kind = KIND_MAP[tool];
     };
 
+    const eraseAtPoint = (pointer: fabric.Point) => {
+      const objects = canvas.getObjects();
+      for (let i = objects.length - 1; i >= 0; i--) {
+        const obj = objects[i];
+        if (isEraseProtected(obj)) continue;
+        if (obj.containsPoint(pointer)) {
+          canvas.remove(obj);
+          erasedAnyRef.current = true;
+          canvas.requestRenderAll();
+          break;
+        }
+      }
+    };
+
+    const updateEraserCursor = (e: fabric.TPointerEvent) => {
+      const el = containerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const { x, y } = getClientXY(e as unknown as Event);
+      setEraserCursor({ x: x - rect.left, y: y - rect.top, visible: true });
+    };
+
+    const hideEraserCursor = () => {
+      setEraserCursor((c) => ({ ...c, visible: false }));
+    };
+
     const onMouseDown = (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
       const tool = activeToolRef.current;
       const s = settingsRef.current;
       const pointer = canvas.getScenePoint(opt.e);
 
       if (tool === "eraser") {
-        const objects = canvas.getObjects();
-        for (let i = objects.length - 1; i >= 0; i--) {
-          if (objects[i].containsPoint(pointer)) {
-            canvas.remove(objects[i]);
-            snapshot();
-            break;
-          }
-        }
+        isErasingRef.current = true;
+        erasedAnyRef.current = false;
+        eraseAtPoint(pointer);
+        updateEraserCursor(opt.e);
         return;
       }
 
@@ -454,37 +547,51 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       }
 
       if (tool === "sticky") {
-        const group = new fabric.Group(
-          [
-            new fabric.Rect({
-              width: 180,
-              height: 160,
-              fill: "#faecd9",
-              rx: 12,
-              ry: 12,
-              shadow: new fabric.Shadow({
-                color: "rgba(33, 31, 26, 0.14)",
-                blur: 8,
-                offsetY: 2,
-              }),
-            }),
-            new fabric.Textbox("ملاحظة...", {
-              left: 12,
-              top: 12,
-              width: 156,
-              fontSize: 16,
-              fill: "#211f1a",
-            }),
-          ],
-          { left: pointer.x, top: pointer.y }
-        );
-        assignMeta(group, "sticky");
-        attachNestedTextEditing(group, () => {
-          canvas.setActiveObject(group);
-          canvas.requestRenderAll();
-          snapshot();
+        // الملاحظة اللاصقة مستطيل ونص كعنصرين مستقلّين (لا تجميع) حتى تعمل
+        // الكتابة المباشرة بالنقر المزدوج بشكل طبيعي عبر فابريك، وتُربط
+        // ببعضها في لوحة الطبقات فقط عبر groupTag مشترك.
+        const stickyTag = crypto.randomUUID();
+        const rect = new fabric.Rect({
+          left: pointer.x,
+          top: pointer.y,
+          width: 180,
+          height: 160,
+          fill: "#faecd9",
+          rx: 12,
+          ry: 12,
+          shadow: new fabric.Shadow({
+            color: "rgba(33, 31, 26, 0.14)",
+            blur: 8,
+            offsetY: 2,
+          }),
         });
-        canvas.add(group);
+        const textbox = new fabric.Textbox("ملاحظة...", {
+          left: pointer.x + 12,
+          top: pointer.y + 12,
+          width: 156,
+          fontSize: 16,
+          fill: "#211f1a",
+        });
+
+        [rect, textbox].forEach((obj, i) => {
+          const anyObj = obj as fabric.Object & {
+            id?: string;
+            name?: string;
+            kind?: IconName;
+            groupTag?: string;
+            groupLabel?: string;
+            groupIcon?: IconName;
+          };
+          anyObj.id = crypto.randomUUID();
+          anyObj.name = i === 0 ? "ملاحظة" : "ملاحظة (نص)";
+          anyObj.kind = "sticky";
+          anyObj.groupTag = stickyTag;
+          anyObj.groupLabel = "ملاحظة لاصقة";
+          anyObj.groupIcon = "sticky";
+        });
+
+        canvas.add(rect);
+        canvas.add(textbox);
         snapshot();
         setActiveTool("select");
         return;
@@ -541,6 +648,14 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
 
     const onMouseMove = (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
+      if (activeToolRef.current === "eraser") {
+        updateEraserCursor(opt.e);
+        if (isErasingRef.current) {
+          eraseAtPoint(canvas.getScenePoint(opt.e));
+        }
+        return;
+      }
+
       if (!isDrawingShape || !activeShape) return;
       const pointer = canvas.getScenePoint(opt.e);
       const width = pointer.x - shapeOrigin.x;
@@ -581,6 +696,15 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
 
     const onMouseUp = () => {
+      if (isErasingRef.current) {
+        isErasingRef.current = false;
+        hideEraserCursor();
+        if (erasedAnyRef.current) {
+          erasedAnyRef.current = false;
+          snapshot();
+        }
+        return;
+      }
       if (isDrawingShape) {
         isDrawingShape = false;
         activeShape = null;
@@ -619,18 +743,9 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
           return;
         }
       }
-
-      // الكتابة داخل عنصر نصي متداخل (ملاحظة لاصقة أو عقدة قالب)
-      for (let i = objects.length - 1; i >= 0; i--) {
-        const textObj = findTextboxAtPoint(objects[i], pointer);
-        if (textObj) {
-          canvas.setActiveObject(textObj);
-          textObj.enterEditing();
-          textObj.selectAll();
-          canvas.requestRenderAll();
-          return;
-        }
-      }
+      // ملاحظة: الكتابة داخل مربعات النص (نص حر، ملاحظة لاصقة، عقدة قالب)
+      // تعمل تلقائيًا عبر آلية فابريك الأصلية للنقر المزدوج، لأن كل عنصر
+      // نصي أصبح كائنًا مستقلًا على مستوى اللوحة (بدون تجميع).
     };
 
     const onMouseWheel = (opt: { e: WheelEvent }) => {
@@ -699,6 +814,12 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
+    if (activeTool !== "eraser") {
+      isErasingRef.current = false;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setEraserCursor((c) => (c.visible ? { ...c, visible: false } : c));
+    }
+
     const freeDrawTools: ToolType[] = ["pen", "spray", "highlighter"];
     const crosshairTools: ToolType[] = [
       "rectangle",
@@ -745,6 +866,84 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       }
     }
   }, [activeTool, settings]);
+
+  // دعم اللمس بإصبعين: تكبير/تصغير بالقرص وتحريك اللوحة بإصبعين معًا
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    let lastDist = 0;
+    let lastMid = { x: 0, y: 0 };
+
+    const getTouchInfo = (touches: TouchList) => {
+      const t1 = touches[0];
+      const t2 = touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const mid = {
+        x: (t1.clientX + t2.clientX) / 2,
+        y: (t1.clientY + t2.clientY) / 2,
+      };
+      return { dist, mid };
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const { dist, mid } = getTouchInfo(e.touches);
+      lastDist = dist;
+      lastMid = mid;
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const canvas = fabricRef.current;
+      if (!canvas) return;
+      const rect = el.getBoundingClientRect();
+      const { dist, mid } = getTouchInfo(e.touches);
+
+      if (lastDist > 0) {
+        const scaleDelta = dist / lastDist;
+        const z = Math.min(Math.max(canvas.getZoom() * scaleDelta, 0.2), 4);
+        canvas.zoomToPoint(
+          new fabric.Point(mid.x - rect.left, mid.y - rect.top),
+          z
+        );
+        setZoom(z);
+      }
+
+      canvas.relativePan(
+        new fabric.Point(mid.x - lastMid.x, mid.y - lastMid.y)
+      );
+
+      lastDist = dist;
+      lastMid = mid;
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) lastDist = 0;
+    };
+
+    el.addEventListener("touchstart", onTouchStart, {
+      passive: false,
+      capture: true,
+    });
+    el.addEventListener("touchmove", onTouchMove, {
+      passive: false,
+      capture: true,
+    });
+    el.addEventListener("touchend", onTouchEnd, { capture: true });
+    el.addEventListener("touchcancel", onTouchEnd, { capture: true });
+
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart, { capture: true });
+      el.removeEventListener("touchmove", onTouchMove, { capture: true });
+      el.removeEventListener("touchend", onTouchEnd, { capture: true });
+      el.removeEventListener("touchcancel", onTouchEnd, { capture: true });
+    };
+  }, []);
 
   const handleUndo = () => {
     const canvas = fabricRef.current;
@@ -838,11 +1037,6 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     anyGroup.name = "مجموعة";
     anyGroup.kind = "group";
     anyGroup.groupedByUser = true;
-    attachNestedTextEditing(group, () => {
-      canvas.setActiveObject(group);
-      canvas.requestRenderAll();
-      snapshot();
-    });
     setSelectionKind("userGroup");
     setSelectedLayerId(anyGroup.id ?? null);
     snapshot();
@@ -859,62 +1053,80 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
   const handleSelectLayer = (id: string) => {
     const canvas = fabricRef.current;
-    const obj = findObjectById(id);
-    if (!canvas || !obj) return;
-    canvas.setActiveObject(obj);
+    if (!canvas) return;
+    const objs = getLayerObjects(canvas, id);
+    if (objs.length === 0) return;
+    if (objs.length === 1) canvas.setActiveObject(objs[0]);
+    else canvas.setActiveObject(new fabric.ActiveSelection(objs, { canvas }));
     canvas.requestRenderAll();
     setSelectedLayerId(id);
   };
 
   const handleToggleVisible = (id: string) => {
-    const obj = findObjectById(id);
-    if (!obj) return;
-    obj.set({ visible: !obj.visible });
-    fabricRef.current?.requestRenderAll();
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const objs = getLayerObjects(canvas, id);
+    const current = layers.find((l) => l.id === id)?.visible ?? true;
+    objs.forEach((o) => o.set({ visible: !current }));
+    canvas.requestRenderAll();
     snapshot();
   };
 
   const handleToggleLock = (id: string) => {
-    const obj = findObjectById(id) as
-      | (fabric.Object & { locked?: boolean })
-      | null;
-    if (!obj) return;
-    obj.locked = !obj.locked;
-    obj.selectable = !obj.locked;
-    obj.evented = !obj.locked;
-    fabricRef.current?.requestRenderAll();
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const objs = getLayerObjects(canvas, id) as (fabric.Object & {
+      locked?: boolean;
+    })[];
+    const current = layers.find((l) => l.id === id)?.locked ?? false;
+    const next = !current;
+    objs.forEach((o) => {
+      o.locked = next;
+      o.selectable = !next;
+      o.evented = !next;
+    });
+    canvas.requestRenderAll();
     snapshot();
   };
 
   const handleRenameLayer = (id: string, name: string) => {
-    const obj = findObjectById(id) as fabric.Object & { name?: string };
-    if (!obj) return;
-    obj.name = name;
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const objs = getLayerObjects(canvas, id) as (fabric.Object & {
+      name?: string;
+      groupTag?: string;
+      groupLabel?: string;
+    })[];
+    objs.forEach((o) => {
+      if (o.groupTag) o.groupLabel = name;
+      else o.name = name;
+    });
     snapshot();
   };
 
   const handleMoveUp = (id: string) => {
     const canvas = fabricRef.current;
-    const obj = findObjectById(id);
-    if (!canvas || !obj) return;
-    canvas.bringObjectForward(obj);
+    if (!canvas) return;
+    getLayerObjects(canvas, id).forEach((o) => canvas.bringObjectForward(o));
     snapshot();
   };
 
   const handleMoveDown = (id: string) => {
     const canvas = fabricRef.current;
-    const obj = findObjectById(id);
-    if (!canvas || !obj) return;
-    canvas.sendObjectBackwards(obj);
+    if (!canvas) return;
+    getLayerObjects(canvas, id).forEach((o) => canvas.sendObjectBackwards(o));
     snapshot();
   };
 
   const handleReorderLayers = (orderedIdsBottomToTop: string[]) => {
     const canvas = fabricRef.current;
     if (!canvas) return;
-    orderedIdsBottomToTop.forEach((id, index) => {
-      const obj = findObjectById(id);
-      if (obj) canvas.moveObjectTo(obj, index);
+    let index = 0;
+    orderedIdsBottomToTop.forEach((id) => {
+      getLayerObjects(canvas, id).forEach((obj) => {
+        canvas.moveObjectTo(obj, index);
+        index += 1;
+      });
     });
     canvas.requestRenderAll();
     snapshot();
@@ -922,9 +1134,8 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
   const handleDeleteLayer = (id: string) => {
     const canvas = fabricRef.current;
-    const obj = findObjectById(id);
-    if (!canvas || !obj) return;
-    canvas.remove(obj);
+    if (!canvas) return;
+    getLayerObjects(canvas, id).forEach((o) => canvas.remove(o));
     snapshot();
   };
 
@@ -988,37 +1199,53 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       return;
     }
 
-    const imported = await importPdfPages(file);
-    const newPages: PdfPageState[] = imported.map((p) => ({
-      width: p.width,
-      height: p.height,
-      json: null,
-      backgroundDataUrl: p.backgroundDataUrl,
-    }));
+    setPdfImporting(true);
+    try {
+      const imported = await importPdfPages(file);
+      if (imported.length === 0) {
+        alert("لم يتم العثور على أي صفحات قابلة للقراءة في هذا الملف.");
+        return;
+      }
 
-    canvas.clear();
-    canvas.setDimensions({
-      width: newPages[0].width,
-      height: newPages[0].height,
-    });
-    const img = await fabric.FabricImage.fromURL(
-      newPages[0].backgroundDataUrl as string
-    );
-    canvas.backgroundImage = img;
-    canvas.renderAll();
-    newPages[0] = { ...newPages[0], json: canvas.toObject(EXTRA_PROPS) };
+      const newPages: PdfPageState[] = imported.map((p) => ({
+        width: p.width,
+        height: p.height,
+        json: null,
+        backgroundDataUrl: p.backgroundDataUrl,
+      }));
 
-    modeRef.current = "pdf";
-    pagesRef.current = newPages;
-    currentPageIndexRef.current = 0;
-    setMode("pdf");
-    setPages(newPages);
-    setCurrentPageIndex(0);
-    refreshLayers();
-    refreshVoiceNotes();
-    history.reset(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
-    persist();
-    e.target.value = "";
+      canvas.clear();
+      canvas.setDimensions({
+        width: newPages[0].width,
+        height: newPages[0].height,
+      });
+      const img = await fabric.FabricImage.fromURL(
+        newPages[0].backgroundDataUrl as string
+      );
+      canvas.backgroundImage = img;
+      canvas.renderAll();
+      newPages[0] = { ...newPages[0], json: canvas.toObject(EXTRA_PROPS) };
+
+      modeRef.current = "pdf";
+      pagesRef.current = newPages;
+      currentPageIndexRef.current = 0;
+      setMode("pdf");
+      setPages(newPages);
+      setCurrentPageIndex(0);
+      refreshLayers();
+      refreshVoiceNotes();
+      history.reset(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
+      persist();
+    } catch (err) {
+      const message =
+        err instanceof PdfImportError
+          ? err.message
+          : "حدث خطأ غير متوقع أثناء استيراد ملف PDF. جرّب ملفًا آخر أو أصغر.";
+      alert(message);
+    } finally {
+      setPdfImporting(false);
+      e.target.value = "";
+    }
   };
 
   const handleExportPDF = async () => {
@@ -1220,24 +1447,21 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     const objects = buildTemplate(id, cx, cy);
     const info = TEMPLATES.find((t) => t.id === id);
 
-    // القالب بالكامل طبقة واحدة قابلة للتحريك والتحجيم ككتلة واحدة
-    const group = new fabric.Group(objects, {});
-    const anyGroup = group as fabric.Object & {
-      id?: string;
-      name?: string;
-      kind?: IconName;
-    };
-    anyGroup.id = crypto.randomUUID();
-    anyGroup.name = info?.title ?? "قالب";
-    anyGroup.kind = info?.icon ?? "templates";
-
-    attachNestedTextEditing(group, () => {
-      canvas.setActiveObject(group);
-      canvas.requestRenderAll();
-      snapshot();
+    // كل عناصر القالب مستقلة على مستوى اللوحة (لا تجميع) حتى تعمل الكتابة
+    // المباشرة في عقد النص، وتظهر كطبقة واحدة مجمّعة عبر groupTag مشترك.
+    const templateTag = crypto.randomUUID();
+    objects.forEach((obj) => {
+      const anyObj = obj as fabric.Object & {
+        groupTag?: string;
+        groupLabel?: string;
+        groupIcon?: IconName;
+      };
+      anyObj.groupTag = templateTag;
+      anyObj.groupLabel = info?.title ?? "قالب";
+      anyObj.groupIcon = info?.icon ?? "templates";
+      canvas.add(obj);
     });
 
-    canvas.add(group);
     canvas.renderAll();
     setTemplatesOpen(false);
     snapshot();
@@ -1470,6 +1694,28 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
             اللوحة فاضية — اختر أداة وابدأ الرسم
           </p>
         </div>
+      )}
+
+      {pdfImporting && (
+        <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-paper/80 backdrop-blur-[1px]">
+          <div className="flex items-center gap-3 rounded-2xl border border-border bg-surface px-5 py-3 shadow-panel-lg">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+            <span className="text-sm text-ink-soft">جارِ معالجة ملف PDF...</span>
+          </div>
+        </div>
+      )}
+
+      {eraserCursor.visible && (
+        <div
+          className="pointer-events-none absolute z-30 rounded-full border-2 border-ink/50 bg-ink/10"
+          style={{
+            width: Math.max(settings.size * 2 * zoom, 14),
+            height: Math.max(settings.size * 2 * zoom, 14),
+            left: eraserCursor.x,
+            top: eraserCursor.y,
+            transform: "translate(-50%, -50%)",
+          }}
+        />
       )}
 
       <Toolbar

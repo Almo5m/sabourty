@@ -68,8 +68,8 @@ export function LayersPanel({
   };
 
   return (
-    <div className="pointer-events-none absolute start-4 top-20 bottom-4 z-20 flex w-64">
-      <div className="pointer-events-auto flex max-h-full w-full flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-panel">
+    <div className="pointer-events-none absolute end-4 top-16 z-20 flex w-64">
+      <div className="pointer-events-auto flex max-h-[60vh] w-full flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-panel-lg">
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <Icon name="layers" size={16} className="text-ink-soft" />
           <h2 className="text-sm font-semibold text-ink">الطبقات</h2>
