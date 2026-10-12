@@ -20,6 +20,7 @@ export function PageNavigator({
     <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-3">
       <div className="pointer-events-auto flex max-w-full items-center gap-2 rounded-2xl border border-border bg-surface px-2 py-1.5 shadow-panel">
         <button
+          aria-label="الصفحة السابقة"
           onClick={() => onSelect(Math.max(0, currentIndex - 1))}
           disabled={currentIndex === 0}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-accent-soft disabled:opacity-30"
@@ -57,6 +58,7 @@ export function PageNavigator({
         </span>
 
         <button
+          aria-label="الصفحة التالية"
           onClick={() => onSelect(Math.min(pages.length - 1, currentIndex + 1))}
           disabled={currentIndex === pages.length - 1}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-soft hover:bg-accent-soft disabled:opacity-30"

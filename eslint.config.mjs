@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // اختبارات المتصفح الآلية لها package.json خاص بها
+    "e2e/**",
   ]),
 ]);
 

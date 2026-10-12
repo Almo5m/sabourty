@@ -165,7 +165,7 @@ export function LayersPanel({
                     </span>
                   )}
 
-                  <div className="flex shrink-0 items-center opacity-0 group-hover:opacity-100">
+                  <div className="flex shrink-0 items-center">
                     <button
                       onClick={(e) => stop(e, () => onMoveUp(layer.id))}
                       title="لأعلى"

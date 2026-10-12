@@ -46,7 +46,30 @@ export function VideoExportModal({
 }: VideoExportModalProps) {
   const [speed, setSpeed] = useState<1 | 2 | 4>(1);
 
-  const busy = status === "recording" || status === "replaying";
+  // أثناء التسجيل المباشر، اللوحة لازم تفضل قابلة للرسم عليها — فبدل نافذة
+  // كاملة تحجب الشاشة، بنعرض شريط صغير عائم بس فوق اللوحة.
+  if (status === "recording") {
+    return (
+      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-40 flex justify-center px-3">
+        <div className="pointer-events-auto flex items-center gap-3 rounded-2xl border border-border bg-surface px-4 py-2.5 shadow-panel-lg">
+          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-danger" />
+          <span className="font-mono text-sm text-ink">
+            {formatTime(elapsedSeconds)}
+          </span>
+          <span className="text-xs text-ink-faint">جارِ التسجيل المباشر</span>
+          <button
+            onClick={onStop}
+            className="flex items-center gap-1.5 rounded-lg bg-ink px-3 py-1.5 text-xs font-medium text-surface hover:bg-ink/90"
+          >
+            <Icon name="stop" size={13} />
+            إيقاف
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const busy = status === "replaying";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-[2px]">
@@ -74,7 +97,8 @@ export function VideoExportModal({
                 تسجيل مباشر
               </p>
               <p className="mb-3 text-xs text-ink-faint">
-                يسجّل اللوحة لحظيًا مع صوت المايكروفون (حتى 10 دقائق)
+                يسجّل اللوحة لحظيًا مع صوت المايكروفون (حتى 10 دقائق) — وتقدر
+                ترسم وتكتب طول وقت التسجيل عاديًا
               </p>
               <button
                 onClick={onStartLive}
@@ -125,23 +149,6 @@ export function VideoExportModal({
           </div>
         )}
 
-        {status === "recording" && (
-          <div className="flex flex-col items-center gap-4 py-4">
-            <span className="h-3 w-3 animate-pulse rounded-full bg-danger" />
-            <span className="font-mono text-2xl text-ink">
-              {formatTime(elapsedSeconds)}
-            </span>
-            <p className="text-xs text-ink-faint">جارِ التسجيل المباشر...</p>
-            <button
-              onClick={onStop}
-              className="flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-sm font-medium text-surface hover:bg-ink/90"
-            >
-              <Icon name="stop" size={14} />
-              إيقاف التسجيل
-            </button>
-          </div>
-        )}
-
         {status === "replaying" && (
           <div className="flex flex-col items-center gap-4 py-4">
             <span className="h-3 w-3 animate-pulse rounded-full bg-ink" />
@@ -151,6 +158,13 @@ export function VideoExportModal({
             <p className="text-xs text-ink-faint">
               جارِ إعادة رسم خطوات الجلسة وتسجيلها... سينتهي تلقائيًا
             </p>
+            <button
+              onClick={onStop}
+              className="flex items-center gap-2 rounded-xl border border-border px-4 py-2 text-xs text-ink-soft hover:bg-paper"
+            >
+              <Icon name="stop" size={13} />
+              إيقاف الآن
+            </button>
           </div>
         )}
 

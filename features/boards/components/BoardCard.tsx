@@ -31,10 +31,10 @@ export function BoardCard({
   });
 
   return (
-    <div className="group relative overflow-hidden rounded-2xl border border-border bg-surface transition hover:-translate-y-0.5 hover:border-border-strong hover:shadow-panel">
+    <div className="group relative rounded-2xl border border-border bg-surface transition hover:-translate-y-0.5 hover:border-border-strong hover:shadow-panel">
       <button
         onClick={() => router.push(`/board/${board.id}`)}
-        className="relative flex h-36 w-full items-center justify-center overflow-hidden bg-paper"
+        className="relative flex h-36 w-full items-center justify-center overflow-hidden rounded-t-2xl bg-paper"
       >
         {board.thumbnail ? (
           // eslint-disable-next-line @next/next/no-img-element

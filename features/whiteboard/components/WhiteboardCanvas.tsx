@@ -29,6 +29,36 @@ import {
   saveAudioBlob,
 } from "../lib/audioStorage";
 
+// نسخة فابريك 7 تجعل نقطة أصل الأشكال "المنتصف" افتراضيًا. كل منطق الرسم هنا
+// مبني على أن (left, top) هو الركن العلوي، فنضبطها هنا مرة واحدة لكل الأشكال.
+// ملاحظة: لازم نعدّل الكائن في مكانه (Object.assign) — استبداله لا يؤثر.
+// ونفس المكان يضبط هوية عناصر التحديد (لون العلامة بدل الأزرق الافتراضي).
+Object.assign(fabric.FabricObject.ownDefaults, {
+  originX: "left",
+  originY: "top",
+  borderColor: "#1f6f63",
+  cornerColor: "#1f6f63",
+  cornerStrokeColor: "#ffffff",
+  cornerStyle: "circle",
+  cornerSize: 10,
+  transparentCorners: false,
+  borderScaleFactor: 1.5,
+  padding: 4,
+});
+
+/** يضبط صورة خلفية PDF لتغطي الصفحة بالضبط مهما كانت دقة الصورة المرسومة. */
+function fitBackgroundToPage(
+  img: fabric.FabricImage,
+  page: { width: number; height: number }
+) {
+  img.set({
+    left: 0,
+    top: 0,
+    scaleX: page.width / (img.width || page.width),
+    scaleY: page.height / (img.height || page.height),
+  });
+}
+
 const EXTRA_PROPS = [
   "id",
   "name",
@@ -179,9 +209,7 @@ async function renderPageOffscreen(page: PdfPageState): Promise<string> {
     height: page.height,
   });
   if (page.json) {
-    await new Promise<void>((resolve) => {
-      staticCanvas.loadFromJSON(page.json as Record<string, unknown>, () => resolve());
-    });
+    await staticCanvas.loadFromJSON(page.json as Record<string, unknown>);
   }
   staticCanvas.renderAll();
   const dataUrl = staticCanvas.toDataURL({ format: "png", multiplier: 2 });
@@ -425,19 +453,11 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       selection: true,
     });
     fabricRef.current = canvas;
+    if (process.env.NEXT_PUBLIC_E2E === "1") {
+      // خطاف تشخيص للاختبارات الآلية فقط (غير موجود في بناء الإنتاج العادي)
+      (window as unknown as { __canvas?: fabric.Canvas }).__canvas = canvas;
+    }
 
-    // هوية بصرية موحدة لعناصر التحديد بدل الأزرق الافتراضي
-    fabric.FabricObject.ownDefaults = {
-      ...fabric.FabricObject.ownDefaults,
-      borderColor: "#1f6f63",
-      cornerColor: "#1f6f63",
-      cornerStrokeColor: "#ffffff",
-      cornerStyle: "circle",
-      cornerSize: 9,
-      transparentCorners: false,
-      borderScaleFactor: 1.5,
-      padding: 4,
-    };
     canvas.selectionColor = "rgba(31, 111, 99, 0.08)";
     canvas.selectionBorderColor = "#1f6f63";
     canvas.selectionLineWidth = 1.5;
@@ -451,25 +471,36 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
     resize();
     window.addEventListener("resize", resize);
+    let disposed = false;
 
     if (board.mode === "pdf" && board.pdfPages.length > 0) {
       const page = board.pdfPages[board.currentPageIndex] ?? board.pdfPages[0];
       canvas.setDimensions({ width: page.width, height: page.height });
       if (page.json) {
-        canvas.loadFromJSON(page.json as Record<string, unknown>, () => {
+        canvas
+          .loadFromJSON(page.json as Record<string, unknown>)
+          .then(() => {
+            if (disposed) return;
+            canvas.renderAll();
+            refreshLayers();
+            refreshVoiceNotes();
+            history.push(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
+          })
+          .catch(() => {});
+      } else {
+        history.push(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
+      }
+    } else if (board.canvasJSON) {
+      canvas
+        .loadFromJSON(board.canvasJSON as Record<string, unknown>)
+        .then(() => {
+          if (disposed) return;
           canvas.renderAll();
           refreshLayers();
           refreshVoiceNotes();
           history.push(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
-        });
-      }
-    } else if (board.canvasJSON) {
-      canvas.loadFromJSON(board.canvasJSON, () => {
-        canvas.renderAll();
-        refreshLayers();
-        refreshVoiceNotes();
-        history.push(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
-      });
+        })
+        .catch(() => {});
     } else {
       history.push(JSON.stringify(canvas.toObject(EXTRA_PROPS)));
     }
@@ -793,6 +824,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     canvas.on("selection:cleared", onSelectionCleared);
 
     return () => {
+      disposed = true;
       window.removeEventListener("resize", resize);
       canvas.off("mouse:down", onMouseDown);
       canvas.off("mouse:move", onMouseMove);
@@ -874,6 +906,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
     let lastDist = 0;
     let lastMid = { x: 0, y: 0 };
+    let wasDrawingBeforePinch = false;
 
     const getTouchInfo = (touches: TouchList) => {
       const t1 = touches[0];
@@ -890,6 +923,26 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       if (e.touches.length !== 2) return;
       e.preventDefault();
       e.stopPropagation();
+
+      // أوقف وضع الرسم فورًا لحظة ما تلمس إصبع تانية، حتى لا يكمل فابريك
+      // رسم خط عشوائي من الإصبع الأولى أثناء حركة القرص بإصبعين.
+      const canvas = fabricRef.current;
+      if (canvas && canvas.isDrawingMode) {
+        wasDrawingBeforePinch = true;
+        // ألغِ الرسمة الجارية من الإصبع الأولى بدل ما تتحفظ كخط عشوائي:
+        // (1) علم فابريك الداخلي بأن في رسم شغال، (2) معاينة الحبر المؤقتة.
+        const internal = canvas as unknown as {
+          _isCurrentlyDrawing?: boolean;
+          contextTop?: CanvasRenderingContext2D;
+          clearContext?: (ctx: CanvasRenderingContext2D) => void;
+        };
+        internal._isCurrentlyDrawing = false;
+        if (internal.contextTop && internal.clearContext) {
+          internal.clearContext(internal.contextTop);
+        }
+        canvas.isDrawingMode = false;
+      }
+
       const { dist, mid } = getTouchInfo(e.touches);
       lastDist = dist;
       lastMid = mid;
@@ -923,7 +976,21 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
 
     const onTouchEnd = (e: TouchEvent) => {
-      if (e.touches.length < 2) lastDist = 0;
+      if (e.touches.length < 2) {
+        lastDist = 0;
+        if (wasDrawingBeforePinch) {
+          wasDrawingBeforePinch = false;
+          // نؤجل إرجاع وضع الرسم لما بعد ما يخلّص فابريك معالجة رفع الإصبع،
+          // وإلا يعتبر إن في رسمة شغالة ويحفظها كخط عشوائي.
+          setTimeout(() => {
+            const canvas = fabricRef.current;
+            const freeDrawTools: ToolType[] = ["pen", "spray", "highlighter"];
+            if (canvas && freeDrawTools.includes(activeToolRef.current)) {
+              canvas.isDrawingMode = true;
+            }
+          }, 0);
+        }
+      }
     };
 
     el.addEventListener("touchstart", onTouchStart, {
@@ -945,14 +1012,16 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
   }, []);
 
-  const handleUndo = () => {
+  /** يسترجع لقطة محفوظة على اللوحة. التعليق (suppress) يتفك دايمًا حتى لو حصل خطأ. */
+  const restoreSnapshot = async (snapshotJSON: string) => {
     const canvas = fabricRef.current;
     if (!canvas) return;
-    const current = JSON.stringify(canvas.toObject(EXTRA_PROPS));
-    const prev = history.undo(current);
-    if (!prev) return;
     history.setSuppressed(true);
-    canvas.loadFromJSON(JSON.parse(prev), () => {
+    try {
+      canvas.discardActiveObject();
+      setSelectedLayerId(null);
+      setSelectionKind("none");
+      await canvas.loadFromJSON(JSON.parse(snapshotJSON));
       canvas.renderAll();
       refreshLayers();
       refreshVoiceNotes();
@@ -966,33 +1035,19 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         setPages(next);
       }
       persist();
+    } finally {
       history.setSuppressed(false);
-    });
+    }
+  };
+
+  const handleUndo = () => {
+    const prev = history.undo();
+    if (prev) void restoreSnapshot(prev);
   };
 
   const handleRedo = () => {
-    const canvas = fabricRef.current;
-    if (!canvas) return;
-    const current = JSON.stringify(canvas.toObject(EXTRA_PROPS));
-    const next = history.redo(current);
-    if (!next) return;
-    history.setSuppressed(true);
-    canvas.loadFromJSON(JSON.parse(next), () => {
-      canvas.renderAll();
-      refreshLayers();
-      refreshVoiceNotes();
-      if (modeRef.current === "pdf") {
-        const nextPages = [...pagesRef.current];
-        nextPages[currentPageIndexRef.current] = {
-          ...nextPages[currentPageIndexRef.current],
-          json: canvas.toObject(EXTRA_PROPS),
-        };
-        pagesRef.current = nextPages;
-        setPages(nextPages);
-      }
-      persist();
-      history.setSuppressed(false);
-    });
+    const next = history.redo();
+    if (next) void restoreSnapshot(next);
   };
 
   useEffect(() => {
@@ -1160,6 +1215,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         anyImg.name = "صورة";
         anyImg.kind = "image";
         canvas.add(img);
+        canvas.viewportCenterObject(img);
         canvas.setActiveObject(img);
         snapshot();
       });
@@ -1222,6 +1278,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       const img = await fabric.FabricImage.fromURL(
         newPages[0].backgroundDataUrl as string
       );
+      fitBackgroundToPage(img, newPages[0]);
       canvas.backgroundImage = img;
       canvas.renderAll();
       newPages[0] = { ...newPages[0], json: canvas.toObject(EXTRA_PROPS) };
@@ -1290,11 +1347,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     canvas.setDimensions({ width: target.width, height: target.height });
 
     if (target.json) {
-      await new Promise<void>((resolve) => {
-        canvas.loadFromJSON(target.json as Record<string, unknown>, () => resolve());
-      });
+      await canvas.loadFromJSON(target.json as Record<string, unknown>);
     } else if (target.backgroundDataUrl) {
       const img = await fabric.FabricImage.fromURL(target.backgroundDataUrl);
+      fitBackgroundToPage(img, target);
       canvas.backgroundImage = img;
       updatedPages[index] = {
         ...updatedPages[index],
@@ -1574,12 +1630,25 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     videoRecorderRef.current = recorder;
 
     recorder.onstop = () => {
-      canvas.loadFromJSON(savedJSON as Record<string, unknown>, () => {
-        canvas.renderAll();
-        refreshLayers();
-        refreshVoiceNotes();
-        finalizeVideoRecording();
-      });
+      void (async () => {
+        try {
+          await canvas.loadFromJSON(savedJSON as Record<string, unknown>);
+          canvas.renderAll();
+          refreshLayers();
+          refreshVoiceNotes();
+        } finally {
+          finalizeVideoRecording();
+        }
+      })();
+    };
+
+    const stopRecorderSafely = () => {
+      if (
+        videoRecorderRef.current &&
+        videoRecorderRef.current.state !== "inactive"
+      ) {
+        videoRecorderRef.current.stop();
+      }
     };
 
     recorder.start();
@@ -1589,31 +1658,52 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       setVideoElapsed((e) => e + 1);
     }, 1000);
     videoMaxTimeoutRef.current = setTimeout(() => {
-      videoRecorderRef.current?.stop();
+      videoCancelReplayRef.current = true;
+      stopRecorderSafely();
     }, MAX_VIDEO_SECONDS * 1000);
 
-    for (let i = 0; i < steps.length; i++) {
-      if (videoCancelReplayRef.current) break;
-      await new Promise<void>((resolve) => {
-        canvas.loadFromJSON(steps[i].json as Record<string, unknown>, () =>
-          resolve()
-        );
-      });
-      canvas.renderAll();
-      let delay = 500;
-      if (i > 0) {
-        const rawDelta = steps[i].t - steps[i - 1].t;
-        delay = Math.min(Math.max(rawDelta, 150), 2000) / speed;
+    // تأخير كل خطوة مبني على الوقت الحقيقي بينها وبين اللي قبلها، لكن بحد
+    // أقصى إجمالي منطقي حتى لو الجلسة فيها مئات الخطوات (حتى لا يستمر العدّاد
+    // لوقت طويل بلا داعٍ)، وبحماية ضد أي خطوة تعلّق أثناء تحميلها.
+    const MAX_REPLAY_MS = 120000;
+    const rawDelays = steps.map((s, i) =>
+      i === 0 ? 500 : Math.min(Math.max(s.t - steps[i - 1].t, 150), 2000)
+    );
+    const totalRaw = rawDelays.reduce((a, b) => a + b, 0) / speed;
+    const compress = totalRaw > MAX_REPLAY_MS ? MAX_REPLAY_MS / totalRaw : 1;
+
+    const loadStepSafely = (json: unknown) =>
+      Promise.race([
+        canvas
+          .loadFromJSON(json as Record<string, unknown>)
+          .then(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+      ]);
+
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        if (videoCancelReplayRef.current) break;
+        await loadStepSafely(steps[i].json);
+        canvas.renderAll();
+        const delay = (rawDelays[i] / speed) * compress;
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    } catch {
+      // تجاهل أي خطأ غير متوقع أثناء إعادة التشغيل وأنهِ التسجيل بأمان
+    } finally {
+      stopRecorderSafely();
     }
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    if (!videoCancelReplayRef.current) recorder.stop();
   };
 
   const handleStopVideo = () => {
     if (videoStatus === "replaying") videoCancelReplayRef.current = true;
-    videoRecorderRef.current?.stop();
+    if (
+      videoRecorderRef.current &&
+      videoRecorderRef.current.state !== "inactive"
+    ) {
+      videoRecorderRef.current.stop();
+    }
   };
 
   const handleDownloadVideo = () => {
@@ -1676,13 +1766,18 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
             : undefined
         }
       >
-        {mode === "pdf" ? (
-          <div className="flex min-h-full items-start justify-center p-6 pt-28">
-            <canvas ref={canvasElRef} />
-          </div>
-        ) : (
+        {/* مهم: نفس شجرة العناصر في الوضعين. فابريك بينقل عنصر canvas لحاوية
+            خاصة به، فلو غيّرنا مكانه في React عند التحويل لوضع PDF يحصل خطأ
+            removeChild وتقفل الصفحة. */}
+        <div
+          className={
+            mode === "pdf"
+              ? "flex min-h-full items-start justify-center p-6 pt-28"
+              : undefined
+          }
+        >
           <canvas ref={canvasElRef} />
-        )}
+        </div>
       </div>
 
       {canvasIsEmpty && (

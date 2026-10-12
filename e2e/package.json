@@ -1,0 +1,12 @@
+{
+  "name": "sabourty-e2e",
+  "private": true,
+  "type": "module",
+  "description": "اختبارات آلية على متصفح حقيقي (كروم بدون واجهة) لسبورتي",
+  "scripts": { "test": "node regress.mjs" },
+  "dependencies": {
+    "@sparticuz/chromium": "^138.0.0",
+    "pdf-lib": "^1.17.1",
+    "puppeteer-core": "^24.0.0"
+  }
+}

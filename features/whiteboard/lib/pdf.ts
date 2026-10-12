@@ -9,9 +9,12 @@ const MAX_PAGES = 80;
 const JPEG_QUALITY = 0.82;
 
 async function getPdfjs() {
-  const pdfjs = await import("pdfjs-dist");
+  // نستخدم نسخة legacy عمدًا: النسخة العادية تعتمد على دوال جافاسكربت حديثة جدًا
+  // (مثل Uint8Array.toHex) مش موجودة في كروم الأقدم/تابلت أندرويد، وبتفشل بخطأ
+  // "toHex is not a function". نسخة legacy فيها polyfills لده.
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/build/pdf.worker.min.mjs",
+    "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
     import.meta.url
   ).toString();
   return pdfjs;
@@ -33,7 +36,8 @@ export async function importPdfPages(file: File): Promise<ImportedPdfPage[]> {
   let pdfjs: Awaited<ReturnType<typeof getPdfjs>>;
   try {
     pdfjs = await getPdfjs();
-  } catch {
+  } catch (error) {
+    console.error("[pdf] تعذّر تحميل pdfjs", error);
     throw new PdfImportError(
       "تعذّر تحميل أداة قراءة PDF. تأكد من اتصالك بالإنترنت وحاول مجددًا."
     );
@@ -42,14 +46,16 @@ export async function importPdfPages(file: File): Promise<ImportedPdfPage[]> {
   let buffer: ArrayBuffer;
   try {
     buffer = await file.arrayBuffer();
-  } catch {
+  } catch (error) {
+    console.error("[pdf] تعذّرت قراءة الملف", error);
     throw new PdfImportError("تعذّرت قراءة الملف المختار.");
   }
 
   let doc;
   try {
     doc = await pdfjs.getDocument({ data: buffer }).promise;
-  } catch {
+  } catch (error) {
+    console.error("[pdf] getDocument فشل:", (error as Error)?.name, (error as Error)?.message);
     throw new PdfImportError("هذا الملف ليس PDF صالحًا أو تالف.");
   }
 
@@ -88,7 +94,8 @@ export async function importPdfPages(file: File): Promise<ImportedPdfPage[]> {
       // تنفّس بين كل صفحة وأخرى حتى لا يتجمّد المتصفح أو يعتبر الصفحة
       // متوقفة عن الاستجابة أثناء معالجة ملفات كبيرة.
       await nextFrame();
-    } catch {
+    } catch (error) {
+      console.error(`[pdf] فشلت معالجة الصفحة ${pageNumber}`, error);
       throw new PdfImportError(
         `حدث خطأ أثناء معالجة الصفحة ${pageNumber}. جرّب ملفًا آخر أو قسّم الملف لأجزاء أصغر.`
       );

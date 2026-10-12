@@ -19,9 +19,16 @@ import { Icon, Logomark } from "@/features/shared/icons/Icon";
 export default function HomePage() {
   const router = useRouter();
   const { user, configured, signOut } = useAuth();
-  const [boards, setBoards] = useState<BoardSummary[]>(() =>
-    typeof window === "undefined" ? [] : listBoards()
-  );
+  // نبدأ بقائمة فاضية (نفس ما يرسمه السيرفر) ونحمّل اللوحات بعد التركيب،
+  // وإلا يحصل عدم تطابق بين HTML السيرفر والمتصفح (خطأ React #418).
+  const [boards, setBoards] = useState<BoardSummary[]>([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBoards(listBoards());
+    setLoaded(true);
+  }, []);
   const [authOpen, setAuthOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [query, setQuery] = useState("");
@@ -185,7 +192,7 @@ export default function HomePage() {
             </div>
           </header>
 
-          {boards.length === 0 ? (
+          {!loaded ? null : boards.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-border-strong bg-surface px-6 py-20 text-center">
               <svg
                 width="120"

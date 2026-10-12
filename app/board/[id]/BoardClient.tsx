@@ -25,13 +25,15 @@ export function BoardClient({ boardId }: { boardId: string }) {
     userIdRef.current = user?.id ?? null;
   }, [user]);
 
-  const [board] = useState<BoardData | null | "loading">(() => {
-    if (typeof window === "undefined") return "loading";
-    const existing = getBoard(boardId);
-    if (existing) return existing;
-    const created = createBoard("لوحة بدون عنوان");
-    return created;
-  });
+  // نبدأ بحالة "جارِ التحميل" (نفس ما يرسمه السيرفر) ونقرأ اللوحة بعد التركيب،
+  // وإلا يحصل عدم تطابق هيدرشن (خطأ React #418).
+  const [board, setBoard] = useState<BoardData | null | "loading">("loading");
+
+  useEffect(() => {
+    const existing = getBoard(boardId) ?? createBoard("لوحة بدون عنوان");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBoard(existing);
+  }, [boardId]);
 
   const resolvedIdRef = useRef<string>(boardId);
   useEffect(() => {
