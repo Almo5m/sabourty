@@ -1,4 +1,10 @@
-import { BoardData, BoardMode, BoardSummary, PdfPageState } from "../types";
+import {
+  BoardCanvasSettings,
+  BoardData,
+  BoardMode,
+  BoardSummary,
+  PdfPageState,
+} from "../types";
 
 const INDEX_KEY = "sabourty:boards:index";
 const boardKey = (id: string) => `sabourty:board:${id}`;
@@ -76,6 +82,7 @@ export function saveBoard(
     mode?: BoardMode;
     pdfPages?: PdfPageState[];
     currentPageIndex?: number;
+    settings?: BoardCanvasSettings;
   },
   thumbnail: string | null
 ) {
@@ -151,7 +158,14 @@ export function upsertLocalBoardFromRemote(
   board: BoardData,
   thumbnail: string | null
 ) {
-  window.localStorage.setItem(boardKey(board.id), JSON.stringify(board));
+  // إعدادات مظهر اللوحة محلية حاليًا (جدول السحابة ما فيهوش عمود ليها)،
+  // فنحافظ على اللي عندك لو نزلنا نسخة أحدث من السحابة.
+  const existing = getBoard(board.id);
+  const merged: BoardData = {
+    ...board,
+    settings: board.settings ?? existing?.settings,
+  };
+  window.localStorage.setItem(boardKey(board.id), JSON.stringify(merged));
   const index = readIndex();
   const entry = index.find((b) => b.id === board.id);
   if (entry) {

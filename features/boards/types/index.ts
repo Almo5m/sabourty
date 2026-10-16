@@ -15,6 +15,12 @@ export interface PdfPageState {
 
 export type BoardMode = "freeform" | "pdf";
 
+/** إعدادات مظهر اللوحة (الخلفية والشبكة) — تخص كل لوحة لوحدها. */
+export interface BoardCanvasSettings {
+  background: string;
+  grid: "auto" | "dots" | "lines" | "none";
+}
+
 export interface BoardData {
   id: string;
   name: string;
@@ -22,6 +28,7 @@ export interface BoardData {
   mode: BoardMode;
   pdfPages: PdfPageState[];
   currentPageIndex: number;
+  settings?: BoardCanvasSettings;
   createdAt: string;
   updatedAt: string;
 }

@@ -61,6 +61,8 @@ interface ToolbarProps {
   onOpenVideoExport: () => void;
   onToggleLayers: () => void;
   layersOpen: boolean;
+  onToggleSettings: () => void;
+  settingsOpen: boolean;
   canGroup: boolean;
   canUngroup: boolean;
   onGroup: () => void;
@@ -111,6 +113,8 @@ export function Toolbar({
   onOpenVideoExport,
   onToggleLayers,
   layersOpen,
+  onToggleSettings,
+  settingsOpen,
   canGroup,
   canUngroup,
   onGroup,
@@ -252,6 +256,12 @@ export function Toolbar({
             label="الطبقات"
             active={layersOpen}
             onClick={onToggleLayers}
+          />
+          <IconButton
+            icon="settings"
+            label="إعدادات اللوحة"
+            active={settingsOpen}
+            onClick={onToggleSettings}
           />
           <IconButton
             icon="templates"

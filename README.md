@@ -135,3 +135,6 @@ NEXT_PUBLIC_E2E=1 npm run build && npx next start -p 3100   # في تيرمنا�
 cd e2e && npm install && npm test                            # في تيرمنال تاني
 ```
 لازم تعدّي كلها قبل أي تحديث جديد.
+
+لفحص جودة الفيديو نفسه (يحتاج ffmpeg عندك): `node video-check.mjs` بيسجّل فيديو حي وفيديو إعادة
+تشغيل ويحفظهم في `/tmp`، و`node replay-content.mjs` بيتأكد إن الرسم بيتحرك والخلفية بيضا.

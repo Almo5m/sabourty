@@ -13,6 +13,9 @@ export async function launch() {
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
       "--autoplay-policy=no-user-gesture-required",
+      "--disable-renderer-backgrounding",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
     ],
     executablePath: process.env.CHROME_PATH ?? (await chromium.executablePath()),
     headless: "shell",
@@ -54,8 +57,7 @@ export const panelCount = (page) =>
   });
 export const savedCount = (page) =>
   page.evaluate(() => {
-    const k = Object.keys(localStorage).find((x) => x.startsWith("sabourty:board:"));
-    const b = JSON.parse(localStorage.getItem(k));
+    const b = JSON.parse(localStorage.getItem("sabourty:board:" + location.pathname.split("/").pop()));
     return b.canvasJSON ? b.canvasJSON.objects.length : 0;
   });
 
@@ -69,3 +71,15 @@ export async function stroke(page, x1, y1, x2, y2) {
 }
 
 export const tool = (page, label) => page.click(`[aria-label="${label}"]`);
+
+/** يحفظ آخر فيديو معروض في نافذة التصدير (blob) كملف على القرص. */
+export async function saveVideo(page, path) {
+  const b64 = await page.evaluate(async () => {
+    const v = document.querySelector("video");
+    const buf = await (await fetch(v.src)).arrayBuffer();
+    let bin = ""; const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  });
+  (await import("fs")).writeFileSync(path, Buffer.from(b64, "base64"));
+}

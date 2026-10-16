@@ -148,6 +148,41 @@ await page.waitForFunction(() => !!document.querySelector("video"), { timeout: 6
 ok(await page.evaluate(() => !!document.querySelector("video")), `session replay finishes and produces a video (${Math.round((Date.now() - t0) / 1000)}s)`);
 await clickByText(page, "button", "تجاهل"); await clickByText(page, "button", "✕").catch(() => {});
 
+// ───────── إعدادات الكانفا (الخلفية والشبكة)
+await newBoard(page);
+const bgKind = () => page.evaluate(() => { const b = window.__canvas.backgroundColor; return typeof b === "string" ? b : "pattern"; });
+ok((await bgKind()) === "pattern", "empty board shows the dot grid (auto mode)");
+await tool(page, "قلم حر"); await stroke(page, 400, 300, 600, 380);
+ok((await bgKind()) === "#ffffff", "grid disappears once drawing starts (auto mode)");
+const alpha = await page.evaluate(() => { const c = document.createElement("canvas"); const img = new Image(); c.width = 20; c.height = 20; return new Promise((res) => { img.onload = () => { const x = c.getContext("2d"); x.drawImage(img, 0, 0); res(x.getImageData(2, 2, 1, 1).data[3]); }; img.src = window.__canvas.toDataURL({ format: "png" }); }); });
+ok(alpha === 255, "exported image has an opaque background (not transparent/black)");
+await tool(page, "إعدادات اللوحة"); await sleep(200);
+await clickByText(page, "button", "نقاط"); await sleep(200);
+ok((await bgKind()) === "pattern", "grid 'dots' stays visible while drawing");
+await page.click('[aria-label="سبورة داكنة"]'); await sleep(300);
+await clickByText(page, "button", "بدون"); await sleep(200);
+ok((await bgKind()) === "#1f2420", "dark board background applied, grid off");
+ok((await page.evaluate(() => window.__canvas.freeDrawingBrush.color)) === "#ffffff", "pen switches to white on a dark board");
+await tool(page, "تراجع"); await sleep(500);
+ok((await bgKind()) === "#1f2420", "background survives undo");
+const saved = await page.evaluate(() => { const b = JSON.parse(localStorage.getItem("sabourty:board:" + location.pathname.split("/").pop())); return { bg: b.settings?.background, grid: b.settings?.grid, hasBgInJson: !!(b.canvasJSON && "background" in b.canvasJSON) }; });
+ok(saved.bg === "#1f2420" && saved.grid === "none" && !saved.hasBgInJson, "settings saved per board, not inside element JSON " + JSON.stringify(saved));
+await page.reload({ waitUntil: "networkidle0" }); await sleep(1200);
+ok((await bgKind()) === "#1f2420", "dark background restored after reload");
+
+// ───────── محتوى الفيديو (قبل التشفير): بيضا + الخط ظاهر وهو بيترسم
+await newBoard(page);
+await tool(page, "قلم حر");
+await tool(page, "تصدير فيديو"); await sleep(300);
+await clickByText(page, "button", "ابدأ التسجيل المباشر"); await sleep(1000);
+await page.mouse.move(400, 400); await page.mouse.down();
+for (let i = 1; i <= 25; i++) { await page.mouse.move(400 + i * 8, 400 + Math.sin(i / 3) * 40); await sleep(30); }
+const mid = await page.evaluate(() => { const c = window.__composite?.canvas; const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let dark = 0, n = 0, bright = 0; for (let i = 0; i < d.length; i += 28) { n++; const l = d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11; if (l < 120) dark++; else if (l > 235) bright++; } return { dark, bright: bright / n }; });
+await page.mouse.up();
+ok(mid.dark > 0 && mid.bright > 0.85, "live recording shows the stroke WHILE it is being drawn, on a white background");
+await clickByText(page, "button", "إيقاف"); await sleep(1500);
+await clickByText(page, "button", "تجاهل");
+
 console.log("\nconsole/page errors:", errors.length ? errors : "none");
 console.log(`\n${pass} passed, ${fail} failed`);
 await browser.close();

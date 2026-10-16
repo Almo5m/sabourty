@@ -1,9 +1,11 @@
 export const MAX_VIDEO_SECONDS = 600; // 10 minutes
 
 export function pickVideoMimeType(): string {
+  // VP8 أولًا: ترميزه أخف بكتير على التابلت والموبايل من VP9، فالتسجيل
+  // يفضل ثابت بدون تقطيع، وبيتشغّل على كل المشغلات.
   const candidates = [
-    "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
+    "video/webm;codecs=vp9,opus",
     "video/webm",
     "video/mp4",
   ];
