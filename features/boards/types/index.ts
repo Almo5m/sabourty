@@ -10,6 +10,10 @@ export interface PdfPageState {
   width: number;
   height: number;
   json: unknown;
+  /**
+   * قديم: كانت صورة الصفحة بتتخزن هنا كنص داخل localStorage. دلوقتي بتتخزن في
+   * IndexedDB (`pageImageStorage`)، والحقل ده بيتقرأ بس عشان ترحيل اللوحات القديمة.
+   */
   backgroundDataUrl?: string;
 }
 

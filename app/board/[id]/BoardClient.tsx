@@ -5,7 +5,11 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { BoardData } from "@/features/boards/types";
-import { createBoard, getBoard } from "@/features/boards/lib/boardStorage";
+import {
+  createBoard,
+  getBoard,
+  migrateLegacyPdfPages,
+} from "@/features/boards/lib/boardStorage";
 import { pushBoardToCloud } from "@/features/boards/lib/sync";
 import { useAuth } from "@/features/auth/AuthContext";
 
@@ -30,9 +34,22 @@ export function BoardClient({ boardId }: { boardId: string }) {
   const [board, setBoard] = useState<BoardData | null | "loading">("loading");
 
   useEffect(() => {
-    const existing = getBoard(boardId) ?? createBoard("لوحة بدون عنوان");
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setBoard(existing);
+    let cancelled = false;
+    const existing = getBoard(boardId);
+    if (!existing) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setBoard(createBoard("لوحة بدون عنوان"));
+      return;
+    }
+    // لوحات PDF القديمة لازم تتنقل صورها لـ IndexedDB قبل ما السبورة تفتح وتبدأ تحفظ.
+    migrateLegacyPdfPages(existing.id)
+      .catch((error) => console.error("[storage] فشل ترحيل لوحة PDF قديمة", error))
+      .finally(() => {
+        if (!cancelled) setBoard(getBoard(existing.id) ?? existing);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [boardId]);
 
   const resolvedIdRef = useRef<string>(boardId);

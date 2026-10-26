@@ -2,6 +2,11 @@ import type { SVGProps } from "react";
 
 export type IconName =
   | "select"
+  | "hand"
+  | "shapes"
+  | "fit"
+  | "pages"
+  | "check"
   | "pen"
   | "spray"
   | "highlighter"
@@ -61,6 +66,9 @@ interface IconProps extends SVGProps<SVGSVGElement> {
   size?: number;
 }
 
+/** تعبئة خفيفة بلون الأيقونة نفسه: بتدّي الأيقونات عمق من غير ما تبقى ثقيلة. */
+const SOFT = { fill: "currentColor", fillOpacity: 0.14 } as const;
+
 const base = {
   fill: "none",
   stroke: "currentColor",
@@ -73,13 +81,29 @@ function paths(name: IconName) {
   switch (name) {
     case "select":
       return (
-        <path d="M6 4.5 17 11l-4.6 1.3L14.8 17 12.4 18l-2.4-4.7L6 16.5V4.5Z" />
+        <path
+          d="M6.2 4.2 18.6 10.6l-5.4 1.7 3.1 5.3-2.4 1.4-3.1-5.3-3.9 3.9L6.2 4.2Z"
+          {...SOFT}
+        />
+      );
+    case "hand":
+      return (
+        <>
+          <path d="M8.6 11.4V6.3a1.3 1.3 0 0 1 2.6 0v4.2" />
+          <path d="M11.2 10.2V4.9a1.3 1.3 0 0 1 2.6 0v5.3" />
+          <path d="M13.8 10.4V6.3a1.3 1.3 0 0 1 2.6 0v6.1" />
+          <path
+            d="M16.4 11.4a1.3 1.3 0 0 1 2.6 0v3.3c0 3.3-2.5 5.8-5.7 5.8h-1.1c-1.9 0-3.1-.6-4.2-1.8l-3-3.4a1.35 1.35 0 0 1 1.9-1.9l1.7 1.6v-4.2"
+            {...SOFT}
+          />
+        </>
       );
     case "pen":
       return (
         <>
-          <path d="M14.5 4.5 18 8l-9.5 9.5-4 1 1-4L14.5 4.5Z" />
-          <path d="M12.5 6.5 16 10" />
+          <path d="M16.6 4.2 19.8 7.4 9.9 17.3 5.8 18.2 6.7 14.1 16.6 4.2Z" {...SOFT} />
+          <path d="m14.3 6.5 3.2 3.2" />
+          <path d="M4 21c1.6-1.3 2.6-1.3 3.8-.3 1.2 1 2.4 1 4.2-.2" />
         </>
       );
     case "spray":
@@ -96,10 +120,43 @@ function paths(name: IconName) {
     case "highlighter":
       return (
         <>
-          <path d="M7 15.5 14 5l3 2-7 10.5-4.5 1.5.5-3.5Z" />
-          <path d="M4 20.5h9" />
+          <g transform="rotate(38 12 10)">
+            <rect x="8.6" y="2.2" width="6.8" height="9.6" rx="1.5" {...SOFT} />
+            <path d="M9.6 11.8 8.4 16h7.2l-1.2-4.2" />
+            <path d="M8.4 16v1.6h7.2V16" />
+          </g>
+          <path d="M3.8 20.6h9" strokeWidth="3.4" strokeOpacity="0.32" />
         </>
       );
+    case "shapes":
+      return (
+        <>
+          <rect x="3.8" y="11.5" width="8.2" height="8.2" rx="1.6" {...SOFT} />
+          <circle cx="16" cy="8" r="4.2" />
+          <path d="M14.2 19.7 17.6 13l3.4 6.7h-6.8Z" />
+        </>
+      );
+    case "fit":
+      return (
+        <>
+          <rect x="7" y="4.5" width="10" height="15" rx="1.4" {...SOFT} />
+          <path d="M3.8 8.5V5.8a1.3 1.3 0 0 1 1.3-1.3h1.2" />
+          <path d="M20.2 8.5V5.8a1.3 1.3 0 0 0-1.3-1.3h-1.2" />
+          <path d="M3.8 15.5v2.7a1.3 1.3 0 0 0 1.3 1.3h1.2" />
+          <path d="M20.2 15.5v2.7a1.3 1.3 0 0 1-1.3 1.3h-1.2" />
+        </>
+      );
+    case "pages":
+      return (
+        <>
+          <rect x="4" y="4" width="6.6" height="8.4" rx="1.2" {...SOFT} />
+          <rect x="13.4" y="4" width="6.6" height="8.4" rx="1.2" />
+          <rect x="4" y="15" width="6.6" height="5" rx="1.2" />
+          <rect x="13.4" y="15" width="6.6" height="5" rx="1.2" />
+        </>
+      );
+    case "check":
+      return <path d="m5.5 12.5 4.2 4.2 8.8-9.4" />;
     case "eraser":
       return (
         <>

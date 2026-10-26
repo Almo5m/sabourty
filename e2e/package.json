@@ -5,6 +5,8 @@
   "description": "اختبارات آلية على متصفح حقيقي (كروم بدون واجهة) لسبورتي",
   "scripts": {
     "test": "node regress.mjs",
+    "test:pdf": "node pdf-and-pen.mjs",
+    "test:migration": "node legacy-migration.mjs",
     "test:replay": "node replay-content.mjs",
     "test:video": "node video-check.mjs"
   },

@@ -3,7 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as fabric from "fabric";
 import { Icon, IconName } from "@/features/shared/icons/Icon";
-import { LayerItem, ToolSettings, ToolType, VoiceNoteMeta } from "../types";
+import {
+  HIGHLIGHTER_DEFAULTS,
+  INK_DEFAULTS,
+  LayerItem,
+  SettingsGroup,
+  settingsGroupOf,
+  ToolSettings,
+  ToolType,
+  VoiceNoteMeta,
+} from "../types";
 import { useCanvasHistory } from "../hooks/useCanvasHistory";
 import { Toolbar } from "./Toolbar";
 import { LayersPanel } from "./LayersPanel";
@@ -17,6 +26,20 @@ import { CanvasSettingsPanel } from "./CanvasSettingsPanel";
 import { saveBoard } from "@/features/boards/lib/boardStorage";
 import { BoardData, BoardMode, PdfPageState } from "@/features/boards/types";
 import { exportPagesAsPdf, importPdfPages, PdfImportError } from "../lib/pdf";
+import {
+  deleteBoardPageImages,
+  PageImageCache,
+  savePageImages,
+} from "../lib/pageImageStorage";
+import {
+  clampZoom,
+  constrainViewportToPage,
+  exportSceneRect,
+  fitPageToCanvas,
+  ViewInsets,
+} from "../lib/viewport";
+import { colorWithAlpha } from "../lib/color";
+import { readImageAsDataUrl } from "../lib/image";
 import { buildTemplate, TEMPLATES, TemplateId } from "../lib/templates";
 import {
   applyCanvasAppearance,
@@ -55,6 +78,16 @@ Object.assign(fabric.FabricObject.ownDefaults, {
   borderScaleFactor: 1.5,
   padding: 4,
 });
+
+/** مساحة محجوزة حوالين صفحة PDF عشان الأشرطة العائمة (فوق/تحت) ما تغطيش عليها. */
+const PDF_VIEW_INSETS: ViewInsets = { top: 76, bottom: 76, side: 12 };
+
+/** عرض سن الفرشاة لكل أداة رسم حر، من قيمة "الحجم" في شريط الخصائص. */
+function brushWidthFor(tool: ToolType, size: number): number {
+  if (tool === "highlighter") return Math.max(14, size * 2);
+  if (tool === "spray") return Math.max(10, size * 2);
+  return size;
+}
 
 /** يضبط صورة خلفية PDF لتغطي الصفحة بالضبط مهما كانت دقة الصورة المرسومة. */
 function fitBackgroundToPage(
@@ -104,7 +137,7 @@ function shapeName(tool: ToolType) {
     sticky: "ملاحظة",
     pen: "رسمة",
     spray: "رشّ",
-    highlighter: "تظليل",
+    highlighter: "هايلايتر",
   };
   return map[tool] ?? "عنصر";
 }
@@ -112,6 +145,7 @@ function shapeName(tool: ToolType) {
 // نفس أسماء الأدوات تُستخدم كأيقونة الطبقة في لوحة الطبقات
 const KIND_MAP: Record<ToolType, IconName> = {
   select: "select",
+  hand: "hand",
   pen: "pen",
   spray: "spray",
   highlighter: "highlighter",
@@ -217,20 +251,42 @@ function getLayerObjects(canvas: fabric.Canvas, id: string): fabric.Object[] {
   return single ? [single] : [];
 }
 
-async function renderPageOffscreen(page: PdfPageState): Promise<string> {
+/** يرسم صفحة PDF (الصورة + الرسومات) بعيدًا عن الشاشة، لتصديرها بدون ما نتنقل لها. */
+async function renderPageOffscreen(
+  page: PdfPageState,
+  imageUrl: string | null
+): Promise<string> {
   const el = document.createElement("canvas");
   const staticCanvas = new fabric.StaticCanvas(el, {
     width: page.width,
     height: page.height,
   });
-  if (page.json) {
-    await staticCanvas.loadFromJSON(page.json as Record<string, unknown>);
+  try {
+    if (page.json) {
+      await staticCanvas.loadFromJSON(page.json as Record<string, unknown>);
+    }
+    staticCanvas.backgroundColor = "#ffffff";
+    if (imageUrl) {
+      const img = await fabric.FabricImage.fromURL(imageUrl);
+      fitBackgroundToPage(img, page);
+      staticCanvas.backgroundImage = img;
+    }
+    staticCanvas.renderAll();
+    return staticCanvas.toDataURL({
+      format: "jpeg",
+      quality: 0.92,
+      multiplier: pageExportMultiplier(page),
+    });
+  } finally {
+    staticCanvas.dispose();
+    el.width = 0;
+    el.height = 0;
   }
-  staticCanvas.backgroundColor = "#ffffff";
-  staticCanvas.renderAll();
-  const dataUrl = staticCanvas.toDataURL({ format: "png", multiplier: 2 });
-  staticCanvas.dispose();
-  return dataUrl;
+}
+
+/** معامل التكبير عند تصدير صفحة: نفس دقة الصورة المرسومة تقريبًا، بحد أقصى 3x. */
+function pageExportMultiplier(page: { width: number; height: number }): number {
+  return Math.min(3, 2200 / Math.max(page.width, page.height));
 }
 
 export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
@@ -240,10 +296,11 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const history = useCanvasHistory();
 
   const [activeTool, setActiveTool] = useState<ToolType>("pen");
-  const [settings, setSettings] = useState<ToolSettings>({
-    color: "#0f172a",
-    size: 4,
-    opacity: 1,
+  const [settings, setSettings] = useState<ToolSettings>(INK_DEFAULTS);
+  // الهايلايتر ليه لون/حجم/شفافية مستقلين، وباقي الأدوات بتشارك إعدادات الحبر
+  const settingsMemoryRef = useRef<Record<SettingsGroup, ToolSettings>>({
+    ink: INK_DEFAULTS,
+    highlighter: HIGHLIGHTER_DEFAULTS,
   });
   const [layers, setLayers] = useState<LayerItem[]>([]);
   const [canvasSettings, setCanvasSettings] = useState<CanvasSettings>(() =>
@@ -259,7 +316,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const [recorderOpen, setRecorderOpen] = useState(false);
   const [voiceNotesPanelOpen, setVoiceNotesPanelOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
-  const [layersOpen, setLayersOpen] = useState(true);
+  // على الشاشات الصغيرة لوحة الطبقات بتغطي اللوحة، فبتبدأ مقفولة
+  const [layersOpen, setLayersOpen] = useState(
+    () => typeof window !== "undefined" && window.innerWidth >= 1024
+  );
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   useEffect(() => {
@@ -273,7 +333,18 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   }>({ x: 0, y: 0, visible: false });
   const isErasingRef = useRef(false);
   const erasedAnyRef = useRef(false);
-  const [pdfImporting, setPdfImporting] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState<{
+    kind: "import" | "export";
+    done: number;
+    total: number;
+  } | null>(null);
+  const pageSwitchingRef = useRef(false);
+  const keyActionsRef = useRef<{
+    goToPage: (index: number) => Promise<void>;
+    zoomBy: (factor: number) => void;
+    resetZoom: () => void;
+  }>({ goToPage: async () => {}, zoomBy: () => {}, resetZoom: () => {} });
+  const [saveFailed, setSaveFailed] = useState(false);
 
   const [videoModalOpen, setVideoModalOpen] = useState(false);
   const [videoStatus, setVideoStatus] = useState<
@@ -310,6 +381,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const modeRef = useRef(mode);
   const pagesRef = useRef(pages);
   const currentPageIndexRef = useRef(currentPageIndex);
+  const pageImagesRef = useRef<PageImageCache | null>(null);
+  const pageBackgroundRef = useRef<fabric.FabricObject | null>(null);
+  /** true لو المستخدم كبّر/حرّك العرض بنفسه (فمبنعيدش ملاءمة الصفحة تلقائيًا عند تغيير حجم الشاشة) */
+  const viewIsManualRef = useRef(false);
 
   useEffect(() => {
     activeToolRef.current = activeTool;
@@ -335,9 +410,112 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         hasObjects: canvas.getObjects().length > 0,
         pdf: modeRef.current === "pdf",
       });
+      // loadFromJSON و clear بيمسحوا صورة الصفحة، فنرجّعها بعد أي تحميل
+      const pageBackground = pageBackgroundRef.current;
+      if (
+        modeRef.current === "pdf" &&
+        pageBackground &&
+        canvas.backgroundImage !== pageBackground
+      ) {
+        canvas.backgroundImage = pageBackground;
+        canvas.requestRenderAll();
+      }
     },
     []
   );
+
+  const getPageImages = useMemo(
+    () => () => {
+      if (!pageImagesRef.current) {
+        pageImagesRef.current = new PageImageCache(board.id);
+      }
+      return pageImagesRef.current;
+    },
+    [board.id]
+  );
+
+  /** أبعاد صفحة الـ PDF الحالية (بوحدات المشهد)، أو null في وضع اللوحة الحرة. */
+  const currentPageRect = useMemo(
+    () => () => {
+      if (modeRef.current !== "pdf") return null;
+      const page = pagesRef.current[currentPageIndexRef.current];
+      return page ? { width: page.width, height: page.height } : null;
+    },
+    []
+  );
+
+  /** يضبط الصفحة الحالية بحجم الشاشة (ملاءمة كاملة) ويصفّر وضع التحكم اليدوي. */
+  const fitCurrentPage = useMemo(
+    () => () => {
+      const canvas = fabricRef.current;
+      const rect = currentPageRect();
+      if (!canvas || !rect) return;
+      viewIsManualRef.current = false;
+      setZoom(fitPageToCanvas(canvas, rect, PDF_VIEW_INSETS));
+    },
+    [currentPageRect]
+  );
+
+  /** يمنع الصفحة من الضياع خارج الشاشة أثناء التحريك/التكبير. */
+  const constrainView = useMemo(
+    () => () => {
+      const canvas = fabricRef.current;
+      const rect = currentPageRect();
+      if (!canvas || !rect) return;
+      constrainViewportToPage(canvas, rect, PDF_VIEW_INSETS);
+      canvas.requestRenderAll();
+    },
+    [currentPageRect]
+  );
+
+  /** عند تغيير حجم النافذة: لو المستخدم ما تدخّلش يدويًا نعيد ملاءمة الصفحة. */
+  const refitPdfView = useMemo(
+    () => () => {
+      if (modeRef.current !== "pdf") return;
+      if (viewIsManualRef.current) constrainView();
+      else fitCurrentPage();
+    },
+    [constrainView, fitCurrentPage]
+  );
+
+  /** يحمّل صورة صفحة الـ PDF من IndexedDB ويثبّتها كخلفية للكانفا. */
+  const loadPageBackground = useMemo(
+    () => async (index: number) => {
+      const canvas = fabricRef.current;
+      const page = pagesRef.current[index];
+      if (!canvas || !page) return;
+
+      let background: fabric.FabricObject;
+      const url = await getPageImages().urlFor(index);
+      if (url) {
+        const img = await fabric.FabricImage.fromURL(url);
+        fitBackgroundToPage(img, page);
+        background = img;
+      } else {
+        // صفحة بدون صورة (مثلًا جاية من السحابة): ورقة بيضا بنفس المقاس
+        background = new fabric.Rect({
+          left: 0,
+          top: 0,
+          width: page.width,
+          height: page.height,
+          fill: "#ffffff",
+        });
+      }
+      background.shadow = new fabric.Shadow({
+        color: "rgba(33, 31, 26, 0.28)",
+        blur: 18,
+        offsetX: 0,
+        offsetY: 4,
+      });
+      pageBackgroundRef.current = background;
+      canvas.backgroundImage = background;
+    },
+    [getPageImages]
+  );
+
+  const markViewManual = () => {
+    viewIsManualRef.current = true;
+  };
 
   const refreshLayers = useMemo(
     () => () => {
@@ -434,31 +612,39 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     () => () => {
       const canvas = fabricRef.current;
       if (!canvas) return;
-      const thumbnail = canvas.toDataURL({ format: "png", multiplier: 0.25 });
-      if (modeRef.current === "pdf") {
-        saveBoard(
-          board.id,
-          {
-            mode: "pdf",
-            pdfPages: pagesRef.current,
-            currentPageIndex: currentPageIndexRef.current,
-            settings: canvasSettingsRef.current,
-          },
-          thumbnail
-        );
-      } else {
-        saveBoard(
-          board.id,
-          {
-            mode: "freeform",
-            canvasJSON: serializeCanvas(canvas),
-            settings: canvasSettingsRef.current,
-          },
-          thumbnail
-        );
-      }
+      const pageRect = currentPageRect();
+      const thumbnail = pageRect
+        ? exportSceneRect(canvas, pageRect, {
+            format: "jpeg",
+            quality: 0.7,
+            multiplier: 240 / pageRect.width,
+          })
+        : canvas.toDataURL({ format: "png", multiplier: 0.25 });
+
+      const saved =
+        modeRef.current === "pdf"
+          ? saveBoard(
+              board.id,
+              {
+                mode: "pdf",
+                pdfPages: pagesRef.current,
+                currentPageIndex: currentPageIndexRef.current,
+                settings: canvasSettingsRef.current,
+              },
+              thumbnail
+            )
+          : saveBoard(
+              board.id,
+              {
+                mode: "freeform",
+                canvasJSON: serializeCanvas(canvas),
+                settings: canvasSettingsRef.current,
+              },
+              thumbnail
+            );
+      setSaveFailed(!saved);
     },
-    [board.id]
+    [board.id, currentPageRect]
   );
 
   const snapshot = useMemo(
@@ -511,10 +697,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     canvas.selectionLineWidth = 1.5;
 
     const resize = () => {
-      if (modeRef.current === "pdf") return;
       const el = containerRef.current;
       if (!el) return;
       canvas.setDimensions({ width: el.clientWidth, height: el.clientHeight });
+      refitPdfView();
       canvas.renderAll();
     };
     resize();
@@ -522,22 +708,28 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     let disposed = false;
 
     if (board.mode === "pdf" && board.pdfPages.length > 0) {
-      const page = board.pdfPages[board.currentPageIndex] ?? board.pdfPages[0];
-      canvas.setDimensions({ width: page.width, height: page.height });
-      if (page.json) {
-        canvas
-          .loadFromJSON(page.json as Record<string, unknown>)
-          .then(() => {
-            if (disposed) return;
-            canvas.renderAll();
-            refreshLayers();
-            refreshVoiceNotes();
-            history.push(JSON.stringify(serializeCanvas(canvas)));
-          })
-          .catch(() => {});
-      } else {
+      const index = Math.min(
+        Math.max(board.currentPageIndex, 0),
+        board.pdfPages.length - 1
+      );
+      currentPageIndexRef.current = index;
+      const page = board.pdfPages[index];
+      void (async () => {
+        try {
+          if (page.json) {
+            await canvas.loadFromJSON(page.json as Record<string, unknown>);
+          }
+          await loadPageBackground(index);
+        } catch (error) {
+          console.error("[pdf] تعذّر فتح الصفحة", error);
+        }
+        if (disposed) return;
+        fitCurrentPage();
+        canvas.renderAll();
+        refreshLayers();
+        refreshVoiceNotes();
         history.push(JSON.stringify(serializeCanvas(canvas)));
-      }
+      })();
     } else if (board.canvasJSON) {
       canvas
         .loadFromJSON(board.canvasJSON as Record<string, unknown>)
@@ -554,6 +746,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     }
 
     let isDrawingShape = false;
+    let panOrigin: { x: number; y: number } | null = null;
     let shapeOrigin = { x: 0, y: 0 };
     let activeShape: fabric.Object | null = null;
 
@@ -598,6 +791,11 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       const tool = activeToolRef.current;
       const s = settingsRef.current;
       const pointer = canvas.getScenePoint(opt.e);
+
+      if (tool === "hand") {
+        panOrigin = getClientXY(opt.e);
+        return;
+      }
 
       if (tool === "eraser") {
         isErasingRef.current = true;
@@ -727,6 +925,17 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
 
     const onMouseMove = (opt: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
+      if (panOrigin) {
+        const point = getClientXY(opt.e);
+        canvas.relativePan(
+          new fabric.Point(point.x - panOrigin.x, point.y - panOrigin.y)
+        );
+        panOrigin = point;
+        markViewManual();
+        constrainView();
+        return;
+      }
+
       if (activeToolRef.current === "eraser") {
         updateEraserCursor(opt.e);
         if (isErasingRef.current) {
@@ -775,6 +984,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     };
 
     const onMouseUp = () => {
+      if (panOrigin) {
+        panOrigin = null;
+        return;
+      }
       if (isErasingRef.current) {
         isErasingRef.current = false;
         hideEraserCursor();
@@ -796,7 +1009,14 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       const tool = activeToolRef.current;
       assignMeta(e.path, tool);
       if (tool === "highlighter") {
-        e.path.set({ globalCompositeOperation: "multiply" });
+        // "multiply" بيخلي النص اللي تحت التظليل يفضل واضح. على خلفية داكنة
+        // بيبوّظ النتيجة (داكن × لون = داكن) فبنسيبه عادي.
+        const onDarkBoard =
+          modeRef.current !== "pdf" &&
+          isDarkColor(canvasSettingsRef.current.background);
+        e.path.set({
+          globalCompositeOperation: onDarkBoard ? "source-over" : "multiply",
+        });
       }
       snapshot();
     };
@@ -830,16 +1050,14 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     const onMouseWheel = (opt: { e: WheelEvent }) => {
       const e = opt.e;
       if (e.ctrlKey || e.metaKey) {
-        let z = canvas.getZoom() * 0.999 ** e.deltaY;
-        z = Math.min(Math.max(z, 0.2), 4);
-        canvas.zoomToPoint(
-          new fabric.Point(e.offsetX, e.offsetY),
-          z
-        );
-        setZoom(z);
+        const z = clampZoom(canvas.getZoom() * 0.999 ** e.deltaY);
+        canvas.zoomToPoint(new fabric.Point(e.offsetX, e.offsetY), z);
+        setZoom(canvas.getZoom());
       } else {
         canvas.relativePan(new fabric.Point(-e.deltaX, -e.deltaY));
       }
+      markViewManual();
+      constrainView();
       e.preventDefault();
       e.stopPropagation();
     };
@@ -916,11 +1134,13 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     const cursor =
       activeTool === "eraser"
         ? "cell"
-        : activeTool === "text"
-          ? "text"
-          : crosshairTools.includes(activeTool)
-            ? "crosshair"
-            : "default";
+        : activeTool === "hand"
+          ? "grab"
+          : activeTool === "text"
+            ? "text"
+            : crosshairTools.includes(activeTool)
+              ? "crosshair"
+              : "default";
     canvas.defaultCursor = cursor;
     canvas.hoverCursor = activeTool === "select" ? "move" : cursor;
     canvas.freeDrawingCursor = "crosshair";
@@ -932,16 +1152,22 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     });
 
     if (canvas.isDrawingMode) {
+      const width = brushWidthFor(activeTool, settings.size);
       if (activeTool === "spray") {
         const brush = new fabric.SprayBrush(canvas);
-        brush.color = settings.color;
-        brush.width = Math.max(10, settings.size * 2);
+        brush.color = colorWithAlpha(settings.color, settings.opacity);
+        brush.width = width;
         canvas.freeDrawingBrush = brush;
       } else {
         const brush = new fabric.PencilBrush(canvas);
-        brush.color = settings.color;
-        brush.width =
-          activeTool === "highlighter" ? settings.size * 3 : settings.size;
+        // الشفافية جوه لون الخط نفسه (rgba): بتظهر وإحنا بنرسم، وبتتحفظ مع الخط،
+        // ومفيش تغميق لما الخط يعدّي على نفسه.
+        brush.color = colorWithAlpha(settings.color, settings.opacity);
+        brush.width = width;
+        if (activeTool === "highlighter") {
+          brush.strokeLineCap = "butt";
+          brush.strokeLineJoin = "round";
+        }
         canvas.freeDrawingBrush = brush;
       }
     }
@@ -1007,17 +1233,19 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
       if (lastDist > 0) {
         const scaleDelta = dist / lastDist;
-        const z = Math.min(Math.max(canvas.getZoom() * scaleDelta, 0.2), 4);
+        const z = clampZoom(canvas.getZoom() * scaleDelta);
         canvas.zoomToPoint(
           new fabric.Point(mid.x - rect.left, mid.y - rect.top),
           z
         );
-        setZoom(z);
+        setZoom(canvas.getZoom());
       }
 
       canvas.relativePan(
         new fabric.Point(mid.x - lastMid.x, mid.y - lastMid.y)
       );
+      markViewManual();
+      constrainView();
 
       lastDist = dist;
       lastMid = mid;
@@ -1058,7 +1286,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       el.removeEventListener("touchend", onTouchEnd, { capture: true });
       el.removeEventListener("touchcancel", onTouchEnd, { capture: true });
     };
-  }, []);
+  }, [constrainView]);
 
   /** يسترجع لقطة محفوظة على اللوحة. التعليق (suppress) يتفك دايمًا حتى لو حصل خطأ. */
   const restoreSnapshot = async (snapshotJSON: string) => {
@@ -1108,6 +1336,43 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         handleRedo();
+      }
+
+      const target = e.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        Boolean(target?.isContentEditable) ||
+        Boolean(
+          (fabricRef.current?.getActiveObject() as
+            | { isEditing?: boolean }
+            | undefined)?.isEditing
+        );
+      if (isTyping) return;
+
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === "0") {
+          e.preventDefault();
+          keyActionsRef.current.resetZoom();
+        } else if (e.key === "=" || e.key === "+") {
+          e.preventDefault();
+          keyActionsRef.current.zoomBy(1.2);
+        } else if (e.key === "-") {
+          e.preventDefault();
+          keyActionsRef.current.zoomBy(1 / 1.2);
+        }
+        return;
+      }
+
+      if (modeRef.current === "pdf") {
+        const current = currentPageIndexRef.current;
+        if (e.key === "PageDown") {
+          e.preventDefault();
+          void keyActionsRef.current.goToPage(current + 1);
+        } else if (e.key === "PageUp") {
+          e.preventDefault();
+          void keyActionsRef.current.goToPage(current - 1);
+        }
       }
     };
     window.addEventListener("keydown", handler);
@@ -1245,37 +1510,45 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const handleImportImage = () => fileInputRef.current?.click();
 
-  const onFileSelected: React.ChangeEventHandler<HTMLInputElement> = (e) => {
+  const onFileSelected: React.ChangeEventHandler<HTMLInputElement> = async (
+    e
+  ) => {
     const file = e.target.files?.[0];
     const canvas = fabricRef.current;
-    if (!file || !canvas) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = reader.result as string;
-      fabric.FabricImage.fromURL(url).then((img) => {
-        img.scaleToWidth(300);
-        const anyImg = img as fabric.Object & {
-          id?: string;
-          name?: string;
-          kind?: IconName;
-        };
-        anyImg.id = crypto.randomUUID();
-        anyImg.name = "صورة";
-        anyImg.kind = "image";
-        canvas.add(img);
-        canvas.viewportCenterObject(img);
-        canvas.setActiveObject(img);
-        snapshot();
-      });
-    };
-    reader.readAsDataURL(file);
     e.target.value = "";
+    if (!file || !canvas) return;
+    try {
+      const url = await readImageAsDataUrl(file);
+      const img = await fabric.FabricImage.fromURL(url);
+      img.scaleToWidth(300);
+      const anyImg = img as fabric.Object & {
+        id?: string;
+        name?: string;
+        kind?: IconName;
+      };
+      anyImg.id = crypto.randomUUID();
+      anyImg.name = "صورة";
+      anyImg.kind = "image";
+      canvas.add(img);
+      canvas.viewportCenterObject(img);
+      canvas.setActiveObject(img);
+      snapshot();
+    } catch (error) {
+      console.error("[image] تعذّر استيراد الصورة", error);
+      alert("تعذّر قراءة هذه الصورة. جرّب صورة أخرى.");
+    }
   };
 
   const handleExportPNG = () => {
     const canvas = fabricRef.current;
     if (!canvas) return;
-    const dataUrl = canvas.toDataURL({ format: "png", multiplier: 2 });
+    const pageRect = currentPageRect();
+    const dataUrl = pageRect
+      ? exportSceneRect(canvas, pageRect, {
+          format: "png",
+          multiplier: pageExportMultiplier(pageRect),
+        })
+      : canvas.toDataURL({ format: "png", multiplier: 2 });
     const link = document.createElement("a");
     link.href = dataUrl;
     link.download = `${board.name}.png`;
@@ -1290,6 +1563,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   ) => {
     const file = e.target.files?.[0];
     const canvas = fabricRef.current;
+    const input = e.target;
     if (!file || !canvas) return;
 
     if (
@@ -1299,41 +1573,52 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         "استيراد PDF سيحوّل هذه اللوحة إلى وضع PDF وستفقد الرسومات الحالية. هل تريد المتابعة؟"
       )
     ) {
-      e.target.value = "";
+      input.value = "";
       return;
     }
 
-    setPdfImporting(true);
+    setPdfBusy({ kind: "import", done: 0, total: 0 });
     try {
-      const imported = await importPdfPages(file);
+      const imported = await importPdfPages(file, {
+        onProgress: (done, total) => setPdfBusy({ kind: "import", done, total }),
+      });
       if (imported.length === 0) {
         alert("لم يتم العثور على أي صفحات قابلة للقراءة في هذا الملف.");
         return;
       }
 
-      const newPages: PdfPageState[] = imported.map((p) => ({
-        width: p.width,
-        height: p.height,
+      // صور الصفحات بتتخزن في IndexedDB (مش localStorage اللي كان بيملى بسرعة)
+      try {
+        await deleteBoardPageImages(board.id);
+        await savePageImages(
+          board.id,
+          imported.map((page) => page.image)
+        );
+      } catch (error) {
+        console.error("[pdf] تعذّر حفظ صور الصفحات", error);
+        throw new PdfImportError(
+          "تعذّر حفظ صفحات الـ PDF على جهازك (المساحة ممتلئة أو التخزين غير متاح). احذف لوحات قديمة أو جرّب ملفًا أصغر."
+        );
+      }
+
+      const newPages: PdfPageState[] = imported.map((page) => ({
+        width: page.width,
+        height: page.height,
         json: null,
-        backgroundDataUrl: p.backgroundDataUrl,
       }));
 
+      canvas.discardActiveObject();
       canvas.clear();
-      canvas.setDimensions({
-        width: newPages[0].width,
-        height: newPages[0].height,
-      });
-      const img = await fabric.FabricImage.fromURL(
-        newPages[0].backgroundDataUrl as string
-      );
-      fitBackgroundToPage(img, newPages[0]);
-      canvas.backgroundImage = img;
-      canvas.renderAll();
-      newPages[0] = { ...newPages[0], json: serializeCanvas(canvas) };
-
+      getPageImages().clear();
       modeRef.current = "pdf";
       pagesRef.current = newPages;
       currentPageIndexRef.current = 0;
+      await loadPageBackground(0);
+      applyAppearance();
+      fitCurrentPage();
+      canvas.renderAll();
+      newPages[0] = { ...newPages[0], json: serializeCanvas(canvas) };
+
       setMode("pdf");
       setPages(newPages);
       setCurrentPageIndex(0);
@@ -1341,21 +1626,24 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       refreshVoiceNotes();
       history.reset(JSON.stringify(serializeCanvas(canvas)));
       persist();
+      void getPageImages().urlFor(1);
     } catch (err) {
+      console.error("[pdf] فشل الاستيراد", err);
       const message =
         err instanceof PdfImportError
           ? err.message
           : "حدث خطأ غير متوقع أثناء استيراد ملف PDF. جرّب ملفًا آخر أو أصغر.";
       alert(message);
     } finally {
-      setPdfImporting(false);
-      e.target.value = "";
+      setPdfBusy(null);
+      input.value = "";
     }
   };
 
   const handleExportPDF = async () => {
     const canvas = fabricRef.current;
-    if (!canvas || modeRef.current !== "pdf") return;
+    const pageRect = currentPageRect();
+    if (!canvas || !pageRect) return;
 
     const currentIndex = currentPageIndexRef.current;
     const updatedPages = [...pagesRef.current];
@@ -1364,57 +1652,92 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       json: serializeCanvas(canvas),
     };
 
-    const blob = await exportPagesAsPdf(updatedPages, async (index) => {
-      if (index === currentIndex) {
-        return canvas.toDataURL({ format: "png", multiplier: 2 });
-      }
-      return renderPageOffscreen(updatedPages[index]);
-    });
+    setPdfBusy({ kind: "export", done: 0, total: updatedPages.length });
+    try {
+      const blob = await exportPagesAsPdf(updatedPages, async (index) => {
+        setPdfBusy({
+          kind: "export",
+          done: index + 1,
+          total: updatedPages.length,
+        });
+        if (index === currentIndex) {
+          return exportSceneRect(canvas, pageRect, {
+            format: "jpeg",
+            quality: 0.92,
+            multiplier: pageExportMultiplier(pageRect),
+          });
+        }
+        return renderPageOffscreen(
+          updatedPages[index],
+          await getPageImages().urlFor(index)
+        );
+      });
 
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${board.name}.pdf`;
-    link.click();
-    URL.revokeObjectURL(url);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${board.name}.pdf`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (error) {
+      console.error("[pdf] فشل التصدير", error);
+      alert("تعذّر تصدير ملف PDF. جرّب مرة تانية أو صدّر الصفحات كصور.");
+    } finally {
+      setPdfBusy(null);
+    }
   };
 
   const goToPage = async (index: number) => {
     const canvas = fabricRef.current;
-    if (!canvas || index === currentPageIndexRef.current) return;
+    if (
+      !canvas ||
+      index === currentPageIndexRef.current ||
+      index < 0 ||
+      index >= pagesRef.current.length ||
+      pageSwitchingRef.current
+    ) {
+      return;
+    }
+    pageSwitchingRef.current = true;
 
-    const currentIndex = currentPageIndexRef.current;
-    const updatedPages = [...pagesRef.current];
-    updatedPages[currentIndex] = {
-      ...updatedPages[currentIndex],
-      json: serializeCanvas(canvas),
-    };
-
-    const target = updatedPages[index];
-    canvas.clear();
-    canvas.setDimensions({ width: target.width, height: target.height });
-
-    if (target.json) {
-      await canvas.loadFromJSON(target.json as Record<string, unknown>);
-    } else if (target.backgroundDataUrl) {
-      const img = await fabric.FabricImage.fromURL(target.backgroundDataUrl);
-      fitBackgroundToPage(img, target);
-      canvas.backgroundImage = img;
-      updatedPages[index] = {
-        ...updatedPages[index],
+    try {
+      const currentIndex = currentPageIndexRef.current;
+      const updatedPages = [...pagesRef.current];
+      updatedPages[currentIndex] = {
+        ...updatedPages[currentIndex],
         json: serializeCanvas(canvas),
       };
-    }
-    canvas.renderAll();
+      const target = updatedPages[index];
 
-    pagesRef.current = updatedPages;
-    currentPageIndexRef.current = index;
-    setPages(updatedPages);
-    setCurrentPageIndex(index);
-    refreshLayers();
-    refreshVoiceNotes();
-    history.reset(JSON.stringify(serializeCanvas(canvas)));
-    persist();
+      canvas.discardActiveObject();
+      pagesRef.current = updatedPages;
+      currentPageIndexRef.current = index;
+      canvas.clear();
+      if (target.json) {
+        await canvas.loadFromJSON(target.json as Record<string, unknown>);
+      }
+      await loadPageBackground(index);
+      if (!target.json) {
+        updatedPages[index] = { ...target, json: serializeCanvas(canvas) };
+      }
+      applyAppearance();
+      fitCurrentPage();
+      canvas.renderAll();
+
+      setPages(updatedPages);
+      setCurrentPageIndex(index);
+      refreshLayers();
+      refreshVoiceNotes();
+      history.reset(JSON.stringify(serializeCanvas(canvas)));
+      persist();
+
+      // نجهّز الصفحة اللي بعدها مقدمًا عشان التقليب يبقى لحظي
+      void getPageImages().urlFor(index + 1);
+    } catch (error) {
+      console.error("[pdf] تعذّر الانتقال للصفحة", error);
+    } finally {
+      pageSwitchingRef.current = false;
+    }
   };
 
   const createVoiceMarker = (
@@ -1546,9 +1869,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const handleUseTemplate = (id: TemplateId) => {
     const canvas = fabricRef.current;
     if (!canvas) return;
-    const cx = canvas.getWidth() / 2;
-    const cy = canvas.getHeight() / 2;
-    const objects = buildTemplate(id, cx, cy);
+    // مركز الجزء الظاهر حاليًا (مش مركز الكانفا)، عشان القالب يظهر قدام المستخدم
+    // حتى لو كان مكبّر أو محرّك اللوحة.
+    const center = canvas.getVpCenter();
+    const objects = buildTemplate(id, center.x, center.y);
     const info = TEMPLATES.find((t) => t.id === id);
 
     // كل عناصر القالب مستقلة على مستوى اللوحة (لا تجميع) حتى تعمل الكتابة
@@ -1796,12 +2120,16 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     // على الخلفية الداكنة الحبر الغامق مبيبانش: نبدّل لون القلم تلقائيًا
     const darkNow = isDarkColor(next.background);
     if (darkNow !== isDarkColor(prev.background)) {
-      setSettings((t) => {
+      const adaptInk = (t: ToolSettings): ToolSettings => {
         if (darkNow && isDarkColor(t.color)) return { ...t, color: "#ffffff" };
         if (!darkNow && t.color.toLowerCase() === "#ffffff")
-          return { ...t, color: "#0f172a" };
+          return { ...t, color: INK_DEFAULTS.color };
         return t;
-      });
+      };
+      settingsMemoryRef.current.ink = adaptInk(settingsMemoryRef.current.ink);
+      if (settingsGroupOf(activeToolRef.current) === "ink") {
+        setSettings(adaptInk);
+      }
     }
     persist();
   };
@@ -1809,40 +2137,60 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   const handleZoomBy = (factor: number) => {
     const canvas = fabricRef.current;
     if (!canvas) return;
+    // نكبّر حوالين مركز المساحة المتاحة (بين الأشرطة) مش مركز الشاشة كلها
+    const insets = currentPageRect()
+      ? PDF_VIEW_INSETS
+      : { top: 0, bottom: 0, side: 0 };
     const center = new fabric.Point(
       canvas.getWidth() / 2,
-      canvas.getHeight() / 2
+      insets.top + (canvas.getHeight() - insets.top - insets.bottom) / 2
     );
-    const z = Math.min(Math.max(canvas.getZoom() * factor, 0.2), 4);
-    canvas.zoomToPoint(center, z);
-    setZoom(z);
+    canvas.zoomToPoint(center, clampZoom(canvas.getZoom() * factor));
+    setZoom(canvas.getZoom());
+    markViewManual();
+    constrainView();
   };
 
+  /** في وضع PDF: ملاءمة الصفحة للشاشة. في اللوحة الحرة: رجوع لـ 100٪. */
   const handleResetZoom = () => {
     const canvas = fabricRef.current;
     if (!canvas) return;
+    if (currentPageRect()) {
+      fitCurrentPage();
+      return;
+    }
     canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
     setZoom(1);
   };
+
+  const handleToolChange = (next: ToolType) => {
+    const previousGroup = settingsGroupOf(activeToolRef.current);
+    const nextGroup = settingsGroupOf(next);
+    if (previousGroup !== nextGroup) {
+      settingsMemoryRef.current[previousGroup] = settingsRef.current;
+      setSettings(settingsMemoryRef.current[nextGroup]);
+    }
+    setActiveTool(next);
+  };
+
+  // اختصارات لوحة المفاتيح لازم تشوف آخر نسخة من الدوال دي (الـ effect بيتسجل مرة واحدة)
+  useEffect(() => {
+    keyActionsRef.current = {
+      goToPage,
+      zoomBy: handleZoomBy,
+      resetZoom: handleResetZoom,
+    };
+  });
 
   const canvasIsEmpty = mode === "freeform" && layers.length === 0;
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-paper">
-      <div
-        ref={containerRef}
-        className={`h-full w-full ${mode === "pdf" ? "overflow-auto" : ""}`}
-      >
+      <div ref={containerRef} className="h-full w-full overflow-hidden">
         {/* مهم: نفس شجرة العناصر في الوضعين. فابريك بينقل عنصر canvas لحاوية
             خاصة به، فلو غيّرنا مكانه في React عند التحويل لوضع PDF يحصل خطأ
             removeChild وتقفل الصفحة. */}
-        <div
-          className={
-            mode === "pdf"
-              ? "flex min-h-full items-start justify-center p-6 pt-28"
-              : undefined
-          }
-        >
+        <div>
           <canvas ref={canvasElRef} />
         </div>
       </div>
@@ -1858,11 +2206,35 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         </div>
       )}
 
-      {pdfImporting && (
-        <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-paper/80 backdrop-blur-[1px]">
+      {pdfBusy && (
+        <div
+          role="status"
+          className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-paper/80"
+        >
           <div className="flex items-center gap-3 rounded-2xl border border-border bg-surface px-5 py-3 shadow-panel-lg">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-            <span className="text-sm text-ink-soft">جارِ معالجة ملف PDF...</span>
+            <span className="text-sm text-ink-soft">
+              {pdfBusy.kind === "import"
+                ? "جارِ معالجة ملف PDF..."
+                : "جارِ تجهيز ملف PDF..."}
+              {pdfBusy.total > 0 && (
+                <span className="ms-2 tabular-nums text-ink-faint">
+                  {pdfBusy.done} / {pdfBusy.total}
+                </span>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {saveFailed && (
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-30 flex justify-center px-3">
+          <div
+            role="alert"
+            className="pointer-events-auto max-w-md rounded-xl border border-danger/30 bg-danger-soft px-4 py-2 text-center text-xs leading-5 text-danger shadow-panel"
+          >
+            مساحة التخزين على الجهاز ممتلئة — آخر تعديلاتك غير محفوظة. صدّر
+            اللوحة أو احذف لوحات قديمة من الصفحة الرئيسية.
           </div>
         </div>
       )}
@@ -1882,7 +2254,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
       <Toolbar
         activeTool={activeTool}
-        onToolChange={setActiveTool}
+        onToolChange={handleToolChange}
         settings={settings}
         onSettingsChange={setSettings}
         onUndo={handleUndo}
@@ -1935,6 +2307,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
       <ZoomControl
         zoom={zoom}
+        isPdfMode={mode === "pdf"}
         onZoomIn={() => handleZoomBy(1.15)}
         onZoomOut={() => handleZoomBy(1 / 1.15)}
         onReset={handleResetZoom}
@@ -1942,9 +2315,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
       {mode === "pdf" && (
         <PageNavigator
-          pages={pages}
+          pageCount={pages.length}
           currentIndex={currentPageIndex}
           onSelect={goToPage}
+          loadThumbnail={(index) => getPageImages().urlFor(index)}
         />
       )}
       {recorderOpen && (

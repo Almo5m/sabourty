@@ -1,8 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon, IconName } from "@/features/shared/icons/Icon";
-import { PRESET_COLORS, ToolSettings, ToolType } from "../types";
+import { colorWithAlpha } from "../lib/color";
+import {
+  HIGHLIGHT_PALETTE,
+  INK_PALETTE,
+  TOOLS_WITH_PROPERTIES,
+  ToolSettings,
+  ToolType,
+} from "../types";
 
 interface ToolButtonDef {
   tool: ToolType;
@@ -10,12 +17,19 @@ interface ToolButtonDef {
   icon: IconName;
 }
 
-const DRAW_TOOLS: ToolButtonDef[] = [
+const NAVIGATE_TOOLS: ToolButtonDef[] = [
   { tool: "select", label: "تحديد", icon: "select" },
+  { tool: "hand", label: "تحريك اللوحة", icon: "hand" },
+];
+
+const DRAW_TOOLS: ToolButtonDef[] = [
   { tool: "pen", label: "قلم حر", icon: "pen" },
+  { tool: "highlighter", label: "هايلايتر", icon: "highlighter" },
   { tool: "spray", label: "فرشاة رش", icon: "spray" },
-  { tool: "highlighter", label: "تظليل", icon: "highlighter" },
   { tool: "eraser", label: "ممحاة", icon: "eraser" },
+];
+
+const INSERT_TOOLS: ToolButtonDef[] = [
   { tool: "text", label: "نص", icon: "text" },
   { tool: "sticky", label: "ملاحظة لاصقة", icon: "sticky" },
   { tool: "voice", label: "ملاحظة صوتية", icon: "voice" },
@@ -30,19 +44,7 @@ const SHAPE_TOOLS: ToolButtonDef[] = [
   { tool: "star", label: "نجمة", icon: "star" },
 ];
 
-const COLOR_TOOLS: ToolType[] = [
-  "pen",
-  "spray",
-  "highlighter",
-  "text",
-  "sticky",
-  "rectangle",
-  "circle",
-  "triangle",
-  "line",
-  "arrow",
-  "star",
-];
+type Popover = "shapes" | "style" | null;
 
 interface ToolbarProps {
   activeTool: ToolType;
@@ -73,26 +75,163 @@ function IconButton({
   icon,
   label,
   active,
+  tone = "tool",
   onClick,
 }: {
   icon: IconName;
   label: string;
   active?: boolean;
+  /** tool = أداة مختارة (أخضر ممتلئ)، toggle = لوحة مفتوحة (أخضر فاتح) */
+  tone?: "tool" | "toggle";
   onClick: () => void;
 }) {
+  const activeClass =
+    tone === "tool"
+      ? "bg-accent text-white shadow-sm"
+      : "bg-accent-soft text-accent-strong";
   return (
     <button
       onClick={onClick}
       title={label}
       aria-label={label}
-      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition ${
-        active
-          ? "bg-accent-soft text-accent-strong"
-          : "text-ink-soft hover:bg-paper hover:text-ink"
+      aria-pressed={active}
+      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition ${
+        active ? activeClass : "text-ink-soft hover:bg-paper hover:text-ink"
       }`}
     >
-      <Icon name={icon} size={18} />
+      <Icon name={icon} size={20} />
     </button>
+  );
+}
+
+function Divider() {
+  return <div className="mx-1 h-6 w-px shrink-0 bg-border" />;
+}
+
+const CHECKER =
+  "repeating-conic-gradient(#d8d1bd 0% 25%, #ffffff 0% 50%) 0 0 / 10px 10px";
+
+function StylePanel({
+  tool,
+  settings,
+  onChange,
+}: {
+  tool: ToolType;
+  settings: ToolSettings;
+  onChange: (settings: ToolSettings) => void;
+}) {
+  const palette = tool === "highlighter" ? HIGHLIGHT_PALETTE : INK_PALETTE;
+  const isCustom = !palette.some(
+    (swatch) => swatch.value.toLowerCase() === settings.color.toLowerCase()
+  );
+  const previewWidth = Math.min(
+    tool === "highlighter" ? Math.max(14, settings.size * 2) : settings.size,
+    26
+  );
+
+  return (
+    <div className="w-[300px] max-w-full space-y-4 rounded-2xl border border-border bg-surface p-4 shadow-panel-lg">
+      <div className="flex flex-wrap gap-2">
+        {palette.map((swatch) => {
+          const selected =
+            swatch.value.toLowerCase() === settings.color.toLowerCase();
+          const light = swatch.value === "#ffffff" || tool === "highlighter";
+          return (
+            <button
+              key={swatch.value}
+              title={swatch.label}
+              aria-label={swatch.label}
+              onClick={() => onChange({ ...settings, color: swatch.value })}
+              className={`flex h-8 w-8 items-center justify-center rounded-full border transition ${
+                selected
+                  ? "scale-110 border-ink ring-2 ring-accent/40"
+                  : "border-border-strong hover:scale-105"
+              }`}
+              style={{ backgroundColor: swatch.value }}
+            >
+              {selected && (
+                <Icon
+                  name="check"
+                  size={15}
+                  className={light ? "text-ink" : "text-white"}
+                />
+              )}
+            </button>
+          );
+        })}
+        <label
+          title="لون مخصص"
+          className={`relative flex h-8 w-8 cursor-pointer items-center justify-center overflow-hidden rounded-full border ${
+            isCustom ? "border-ink ring-2 ring-accent/40" : "border-border-strong"
+          }`}
+          style={{
+            background: isCustom
+              ? settings.color
+              : "conic-gradient(#c8432f, #e8b229, #7d9a2e, #1b8aa0, #5a4fcf, #d1427f, #c8432f)",
+          }}
+        >
+          <input
+            type="color"
+            aria-label="لون مخصص"
+            value={settings.color}
+            onChange={(e) => onChange({ ...settings, color: e.target.value })}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          />
+        </label>
+      </div>
+
+      <div
+        className="flex h-10 items-center justify-center overflow-hidden rounded-xl border border-border"
+        style={{ background: CHECKER }}
+        aria-hidden="true"
+      >
+        <span
+          className="block w-4/5"
+          style={{
+            height: previewWidth,
+            borderRadius: tool === "highlighter" ? 2 : previewWidth,
+            backgroundColor: colorWithAlpha(settings.color, settings.opacity),
+          }}
+        />
+      </div>
+
+      <label className="block text-xs text-ink-soft">
+        <span className="mb-1 flex justify-between">
+          <span>الحجم</span>
+          <span className="tabular-nums">{settings.size}</span>
+        </span>
+        <input
+          type="range"
+          min={1}
+          max={40}
+          value={settings.size}
+          onChange={(e) =>
+            onChange({ ...settings, size: Number(e.target.value) })
+          }
+          className="h-6 w-full accent-accent"
+        />
+      </label>
+
+      <label className="block text-xs text-ink-soft">
+        <span className="mb-1 flex justify-between">
+          <span>الشفافية</span>
+          <span className="tabular-nums">
+            {Math.round(settings.opacity * 100)}٪
+          </span>
+        </span>
+        <input
+          type="range"
+          min={0.1}
+          max={1}
+          step={0.05}
+          value={settings.opacity}
+          onChange={(e) =>
+            onChange({ ...settings, opacity: Number(e.target.value) })
+          }
+          className="h-6 w-full accent-accent"
+        />
+      </label>
+    </div>
   );
 }
 
@@ -121,110 +260,119 @@ export function Toolbar({
   onUngroup,
 }: ToolbarProps) {
   const [moreOpen, setMoreOpen] = useState(false);
-  const showProperties = COLOR_TOOLS.includes(activeTool);
+  const [popover, setPopover] = useState<Popover>(null);
+
+  useEffect(() => {
+    if (!popover && !moreOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setPopover(null);
+        setMoreOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [popover, moreOpen]);
+
+  const hasProperties = TOOLS_WITH_PROPERTIES.includes(activeTool);
+  const activeShape = SHAPE_TOOLS.find((t) => t.tool === activeTool);
   const showSelectionActions =
     activeTool === "select" && (canGroup || canUngroup);
 
+  const pickTool = (tool: ToolType) => {
+    setPopover(null);
+    onToolChange(tool);
+  };
+
+  const renderTools = (tools: ToolButtonDef[]) =>
+    tools.map((t) => (
+      <IconButton
+        key={t.tool}
+        icon={t.icon}
+        label={t.label}
+        active={activeTool === t.tool}
+        onClick={() => pickTool(t.tool)}
+      />
+    ));
+
   return (
     <>
+      {(popover || moreOpen) && (
+        <button
+          aria-label="إغلاق"
+          className="absolute inset-0 z-10 cursor-default"
+          onClick={() => {
+            setPopover(null);
+            setMoreOpen(false);
+          }}
+        />
+      )}
+
       {/* الشريط الرئيسي للأدوات */}
       <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-3">
-        <div className="pointer-events-auto flex max-w-full items-center gap-1 overflow-x-auto rounded-2xl border border-border bg-surface px-2 py-1.5 shadow-panel">
-          {DRAW_TOOLS.map((t) => (
-            <IconButton
-              key={t.tool}
-              icon={t.icon}
-              label={t.label}
-              active={activeTool === t.tool}
-              onClick={() => onToolChange(t.tool)}
+        <div className="pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto rounded-2xl border border-border bg-surface px-1.5 py-1.5 shadow-panel">
+          {renderTools(NAVIGATE_TOOLS)}
+          <Divider />
+          {renderTools(DRAW_TOOLS)}
+          <Divider />
+          {renderTools(INSERT_TOOLS)}
+          <Divider />
+          <IconButton
+            icon={activeShape?.icon ?? "shapes"}
+            label="الأشكال"
+            active={Boolean(activeShape) || popover === "shapes"}
+            onClick={() => setPopover((p) => (p === "shapes" ? null : "shapes"))}
+          />
+          <Divider />
+          <button
+            onClick={() => setPopover((p) => (p === "style" ? null : "style"))}
+            disabled={!hasProperties}
+            title="اللون والحجم والشفافية"
+            aria-label="اللون والحجم والشفافية"
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-30 ${
+              popover === "style" ? "bg-accent-soft" : "hover:bg-paper"
+            }`}
+          >
+            <span
+              className="block h-6 w-6 rounded-full border border-border-strong"
+              style={{
+                backgroundColor: hasProperties
+                  ? colorWithAlpha(settings.color, Math.max(settings.opacity, 0.35))
+                  : "transparent",
+              }}
             />
-          ))}
-          <div className="mx-1 h-6 w-px shrink-0 bg-border" />
-          {SHAPE_TOOLS.map((t) => (
-            <IconButton
-              key={t.tool}
-              icon={t.icon}
-              label={t.label}
-              active={activeTool === t.tool}
-              onClick={() => onToolChange(t.tool)}
-            />
-          ))}
-          <div className="mx-1 h-6 w-px shrink-0 bg-border" />
+          </button>
+          <Divider />
           <IconButton icon="undo" label="تراجع" onClick={onUndo} />
           <IconButton icon="redo" label="إعادة" onClick={onRedo} />
         </div>
       </div>
 
-      {/* لوحة الخصائص السياقية (لون / حجم / شفافية) */}
-      {showProperties && (
-        <div className="pointer-events-none absolute inset-x-0 top-[70px] z-20 flex justify-center px-3">
-          <div className="pointer-events-auto flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-surface px-3 py-2 shadow-panel">
-            <div className="flex items-center gap-1">
-              {PRESET_COLORS.map((color) => (
-                <button
-                  key={color}
-                  onClick={() => onSettingsChange({ ...settings, color })}
-                  className={`h-5 w-5 rounded-full border transition ${
-                    settings.color === color
-                      ? "ring-2 ring-offset-1 ring-ink"
-                      : "border-border-strong"
-                  }`}
-                  style={{ backgroundColor: color }}
-                />
-              ))}
-              <input
-                type="color"
-                value={settings.color}
-                onChange={(e) =>
-                  onSettingsChange({ ...settings, color: e.target.value })
-                }
-                className="h-5 w-5 cursor-pointer rounded-full border border-border-strong bg-transparent"
-              />
-            </div>
+      {/* قائمة الأشكال */}
+      {popover === "shapes" && (
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-30 flex justify-center px-3">
+          <div className="pointer-events-auto grid grid-cols-6 gap-1 rounded-2xl border border-border bg-surface p-1.5 shadow-panel-lg">
+            {renderTools(SHAPE_TOOLS)}
+          </div>
+        </div>
+      )}
 
-            <div className="h-5 w-px bg-border" />
-
-            <div className="flex items-center gap-2 text-xs text-ink-soft">
-              <span>الحجم</span>
-              <input
-                type="range"
-                min={1}
-                max={40}
-                value={settings.size}
-                onChange={(e) =>
-                  onSettingsChange({
-                    ...settings,
-                    size: Number(e.target.value),
-                  })
-                }
-                className="w-20 accent-accent"
-              />
-            </div>
-
-            <div className="flex items-center gap-2 text-xs text-ink-soft">
-              <span>الشفافية</span>
-              <input
-                type="range"
-                min={0.1}
-                max={1}
-                step={0.05}
-                value={settings.opacity}
-                onChange={(e) =>
-                  onSettingsChange({
-                    ...settings,
-                    opacity: Number(e.target.value),
-                  })
-                }
-                className="w-20 accent-accent"
-              />
-            </div>
+      {/* اللون / الحجم / الشفافية */}
+      {popover === "style" && hasProperties && (
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-30 flex justify-center px-3">
+          <div className="pointer-events-auto">
+            <StylePanel
+              tool={activeTool}
+              settings={settings}
+              onChange={onSettingsChange}
+            />
           </div>
         </div>
       )}
 
       {/* إجراءات التحديد المتعدد (تجميع / فك تجميع) */}
       {showSelectionActions && (
-        <div className="pointer-events-none absolute inset-x-0 top-[70px] z-20 flex justify-center px-3">
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-20 flex justify-center px-3">
           <div className="pointer-events-auto flex items-center gap-1 rounded-2xl border border-border bg-surface px-2 py-1.5 shadow-panel">
             {canGroup && (
               <button
@@ -249,17 +397,19 @@ export function Toolbar({
       )}
 
       {/* عنقود الإجراءات الثانوية */}
-      <div className="pointer-events-none absolute end-4 top-4 z-20 flex items-start gap-2">
+      <div className="pointer-events-none absolute end-4 top-[68px] z-20 flex items-start gap-2 xl:top-4">
         <div className="pointer-events-auto flex items-center gap-1 rounded-2xl border border-border bg-surface p-1.5 shadow-panel">
           <IconButton
             icon="layers"
             label="الطبقات"
+            tone="toggle"
             active={layersOpen}
             onClick={onToggleLayers}
           />
           <IconButton
             icon="settings"
             label="إعدادات اللوحة"
+            tone="toggle"
             active={settingsOpen}
             onClick={onToggleSettings}
           />

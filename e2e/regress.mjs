@@ -26,7 +26,7 @@ ok((await objects(page)) === 3 && (await panelCount(page)) === 3, "board restore
 
 // ───────── الأشكال والملاحظة اللاصقة والقوالب
 await newBoard(page);
-await tool(page, "مستطيل");
+await tool(page, "الأشكال"); await tool(page, "مستطيل");
 await page.mouse.move(400, 300); await page.mouse.down();
 for (let i = 1; i <= 10; i++) await page.mouse.move(400 + i * 20, 300 + i * 10);
 await page.mouse.up(); await sleep(300);
@@ -115,14 +115,14 @@ for (const [w, h] of [[595, 842], [842, 595], [595, 842]]) {
 fs.writeFileSync("/tmp/test.pdf", await doc.save());
 await newBoard(page);
 await (await page.$('input[type=file][accept="application/pdf"]')).uploadFile("/tmp/test.pdf");
-await page.waitForFunction(() => document.body.innerText.includes("1 / 3"), { timeout: 30000 }).catch(() => {});
-const info = () => page.evaluate(() => { const c = window.__canvas, b = c.backgroundImage; return { w: c.getWidth(), h: c.getHeight(), bw: b && Math.round(b.width * b.scaleX), bh: b && Math.round(b.height * b.scaleY), n: c.getObjects().length, nav: document.body.innerText.match(/\d+ \/ \d+/)?.[0] }; });
+await page.waitForFunction(() => document.querySelector('[aria-label="رقم الصفحة"]') !== null, { timeout: 30000 }).catch(() => {});
+const info = () => page.evaluate(() => { const c = window.__canvas, b = c.backgroundImage; return { w: c.getWidth(), h: c.getHeight(), bw: b && Math.round(b.width * b.scaleX), bh: b && Math.round(b.height * b.scaleY), n: c.getObjects().length, nav: (() => { const i = document.querySelector('[aria-label="رقم الصفحة"]'); return i ? i.value + " / " + i.parentElement.innerText.replace(/\D/g, "") : null; })() }; });
 let i1 = await info();
-ok(i1.nav === "1 / 3" && Math.abs(i1.bw - i1.w) <= 1 && Math.abs(i1.bh - i1.h) <= 1, "PDF imported, background fits the page exactly " + JSON.stringify(i1));
+ok(i1.nav === "1 / 3" && i1.bw === 595 && i1.bh === 842 && i1.w === 1280, "PDF imported, page background is page-sized inside a full-screen canvas " + JSON.stringify(i1));
 await tool(page, "قلم حر"); await stroke(page, 450, 400, 650, 450);
 await tool(page, "الصفحة التالية"); await sleep(1200);
 let i2 = await info();
-ok(i2.nav === "2 / 3" && i2.w === 842 && i2.h === 595, "next page loads (landscape) without hanging");
+ok(i2.nav === "2 / 3" && i2.bw === 842 && i2.bh === 595, "next page loads (landscape) without hanging");
 await stroke(page, 450, 300, 650, 330);
 await tool(page, "الصفحة السابقة"); await sleep(1200);
 ok((await info()).n === 1, "each page keeps its own annotations");
@@ -162,7 +162,7 @@ ok((await bgKind()) === "pattern", "grid 'dots' stays visible while drawing");
 await page.click('[aria-label="سبورة داكنة"]'); await sleep(300);
 await clickByText(page, "button", "بدون"); await sleep(200);
 ok((await bgKind()) === "#1f2420", "dark board background applied, grid off");
-ok((await page.evaluate(() => window.__canvas.freeDrawingBrush.color)) === "#ffffff", "pen switches to white on a dark board");
+ok((await page.evaluate(() => window.__canvas.freeDrawingBrush.color)) .replace(/\s/g, "").match(/^(#ffffff|rgba\(255,255,255,1\))$/) !== null, "pen switches to white on a dark board");
 await tool(page, "تراجع"); await sleep(500);
 ok((await bgKind()) === "#1f2420", "background survives undo");
 const saved = await page.evaluate(() => { const b = JSON.parse(localStorage.getItem("sabourty:board:" + location.pathname.split("/").pop())); return { bg: b.settings?.background, grid: b.settings?.grid, hasBgInJson: !!(b.canvasJSON && "background" in b.canvasJSON) }; });

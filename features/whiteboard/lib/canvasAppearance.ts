@@ -41,6 +41,9 @@ export const GRID_OPTIONS: { label: string; value: CanvasGrid }[] = [
 
 const TILE = 24;
 
+/** لون المساحة حوالين صفحة الـ PDF (الصفحة نفسها بتترسم فوقه كصورة بيضا). */
+export const PDF_WORKSPACE_COLOR = "#e6e2d5";
+
 /** يقرر لو الخلفية داكنة (لضبط لون الحبر ولون الشبكة تلقائيًا). */
 export function isDarkColor(hex: string): boolean {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
@@ -97,7 +100,7 @@ function buildPattern(
 
 export interface AppearanceContext {
   hasObjects: boolean;
-  /** في وضع PDF الخلفية بيضا دايمًا (الصفحة نفسها هي الخلفية) */
+  /** في وضع PDF الخلفية لون مساحة العمل، والصفحة بتترسم فوقها كصورة */
   pdf: boolean;
 }
 
@@ -112,7 +115,7 @@ export function applyCanvasAppearance(
   settings: CanvasSettings,
   ctx: AppearanceContext
 ) {
-  const background = ctx.pdf ? "#ffffff" : settings.background;
+  const background = ctx.pdf ? PDF_WORKSPACE_COLOR : settings.background;
   const effectiveGrid: "dots" | "lines" | "none" = ctx.pdf
     ? "none"
     : settings.grid === "auto"
@@ -136,5 +139,7 @@ export function applyCanvasAppearance(
 export function stripBackground<T extends Record<string, unknown>>(json: T): T {
   const copy = { ...json } as Record<string, unknown>;
   delete copy.background;
+  // صورة صفحة الـ PDF بتتخزن لوحدها في IndexedDB، مش جوه كل لقطة
+  delete copy.backgroundImage;
   return copy as T;
 }

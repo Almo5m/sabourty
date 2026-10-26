@@ -5,6 +5,12 @@ import {
   BoardSummary,
   PdfPageState,
 } from "../types";
+import {
+  copyBoardPageImages,
+  dataUrlToBlob,
+  deleteBoardPageImages,
+  savePageImage,
+} from "@/features/whiteboard/lib/pageImageStorage";
 
 const INDEX_KEY = "sabourty:boards:index";
 const boardKey = (id: string) => `sabourty:board:${id}`;
@@ -75,6 +81,45 @@ export function getBoard(id: string): BoardData | null {
   }
 }
 
+/** صورة الصفحة بتتخزن في IndexedDB، فمبنكتبهاش تاني جوه نص اللوحة في localStorage. */
+function stripPageImages(pages: PdfPageState[]): PdfPageState[] {
+  return pages.map((page) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { backgroundDataUrl, ...rest } = page;
+    const json = rest.json as Record<string, unknown> | null;
+    if (json && "backgroundImage" in json) {
+      const { backgroundImage, ...jsonRest } = json;
+      void backgroundImage;
+      return { ...rest, json: jsonRest };
+    }
+    return rest;
+  });
+}
+
+/**
+ * ترحيل لوحات PDF القديمة: كانت صور الصفحات جوه localStorage (وده كان بيملّاه).
+ * بننقلها لـ IndexedDB ونشيلها من النص المحفوظ. لازم تخلص قبل أي حفظ جديد،
+ * وإلا الصور القديمة تضيع.
+ */
+export async function migrateLegacyPdfPages(id: string): Promise<void> {
+  const board = getBoard(id);
+  if (!board || board.pdfPages.every((page) => !page.backgroundDataUrl)) return;
+
+  for (let index = 0; index < board.pdfPages.length; index++) {
+    const dataUrl = board.pdfPages[index].backgroundDataUrl;
+    if (dataUrl) await savePageImage(id, index, dataUrlToBlob(dataUrl));
+  }
+
+  window.localStorage.setItem(
+    boardKey(id),
+    JSON.stringify({ ...board, pdfPages: stripPageImages(board.pdfPages) })
+  );
+}
+
+/**
+ * يحفظ اللوحة. بيرجّع false لو المساحة امتلأت (QuotaExceededError) بدل ما
+ * يرمي خطأ يوقف الاستيراد أو الرسم، عشان الواجهة تنبّه المستخدم.
+ */
 export function saveBoard(
   id: string,
   updates: {
@@ -85,20 +130,35 @@ export function saveBoard(
     settings?: BoardCanvasSettings;
   },
   thumbnail: string | null
-) {
+): boolean {
   const board = getBoard(id);
-  if (!board) return;
+  if (!board) return false;
   const now = new Date().toISOString();
   const updated: BoardData = { ...board, ...updates, updatedAt: now };
-  window.localStorage.setItem(boardKey(id), JSON.stringify(updated));
-
-  const index = readIndex();
-  const entry = index.find((b) => b.id === id);
-  if (entry) {
-    entry.updatedAt = now;
-    entry.thumbnail = thumbnail;
-    writeIndex(index);
+  if (updates.pdfPages) updated.pdfPages = stripPageImages(updates.pdfPages);
+  else if (updated.pdfPages.length > 0) {
+    updated.pdfPages = stripPageImages(updated.pdfPages);
   }
+
+  try {
+    window.localStorage.setItem(boardKey(id), JSON.stringify(updated));
+  } catch (error) {
+    console.error("[storage] تعذّر حفظ اللوحة (غالبًا المساحة ممتلئة)", error);
+    return false;
+  }
+
+  try {
+    const index = readIndex();
+    const entry = index.find((b) => b.id === id);
+    if (entry) {
+      entry.updatedAt = now;
+      entry.thumbnail = thumbnail;
+      writeIndex(index);
+    }
+  } catch {
+    // الصورة المصغّرة مش أساسية؛ لو مفيش مساحة نكمل من غيرها.
+  }
+  return true;
 }
 
 export function renameBoard(id: string, name: string) {
@@ -139,10 +199,16 @@ export function duplicateBoard(id: string): BoardData | null {
   });
   writeIndex(index);
   window.localStorage.setItem(boardKey(copy.id), JSON.stringify(copy));
+  if (copy.pdfPages.length > 0) {
+    void copyBoardPageImages(id, copy.id, copy.pdfPages.length).catch((error) =>
+      console.error("[storage] تعذّر نسخ صور صفحات الـ PDF", error)
+    );
+  }
   return copy;
 }
 
 export function deleteBoard(id: string) {
+  void deleteBoardPageImages(id).catch(() => {});
   window.localStorage.removeItem(boardKey(id));
   writeIndex(readIndex().filter((b) => b.id !== id));
 }

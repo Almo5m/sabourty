@@ -4,9 +4,9 @@ import type { PdfPageState } from "@/features/boards/types";
 // الحد الأقصى لأطول بُعد في الصورة المُرسّمة لكل صفحة (بالبكسل)، بغض النظر
 // عن حجم الصفحة الأصلي، لتفادي استهلاك ذاكرة مفرط على الأجهزة الضعيفة
 // (تابلت/موبايل) الذي قد يتسبب في انهيار التبويب بالكامل.
-const MAX_RENDER_DIMENSION = 1600;
-const MAX_PAGES = 80;
-const JPEG_QUALITY = 0.82;
+const MAX_RENDER_DIMENSION = 2200;
+const MAX_PAGES = 150;
+const JPEG_QUALITY = 0.85;
 
 async function getPdfjs() {
   // نستخدم نسخة legacy عمدًا: النسخة العادية تعتمد على دوال جافاسكربت حديثة جدًا
@@ -27,12 +27,31 @@ function nextFrame(): Promise<void> {
 export interface ImportedPdfPage {
   width: number;
   height: number;
-  backgroundDataUrl: string;
+  /** صورة الصفحة (JPEG) كـ Blob — بتتخزن في IndexedDB مش في localStorage. */
+  image: Blob;
+}
+
+export interface PdfImportOptions {
+  onProgress?: (done: number, total: number) => void;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) =>
+        blob ? resolve(blob) : reject(new Error("تعذّر تحويل الصفحة لصورة")),
+      "image/jpeg",
+      JPEG_QUALITY
+    );
+  });
 }
 
 export class PdfImportError extends Error {}
 
-export async function importPdfPages(file: File): Promise<ImportedPdfPage[]> {
+export async function importPdfPages(
+  file: File,
+  options: PdfImportOptions = {}
+): Promise<ImportedPdfPage[]> {
   let pdfjs: Awaited<ReturnType<typeof getPdfjs>>;
   try {
     pdfjs = await getPdfjs();
@@ -55,7 +74,13 @@ export async function importPdfPages(file: File): Promise<ImportedPdfPage[]> {
   try {
     doc = await pdfjs.getDocument({ data: buffer }).promise;
   } catch (error) {
-    console.error("[pdf] getDocument فشل:", (error as Error)?.name, (error as Error)?.message);
+    const errorName = (error as Error)?.name;
+    console.error("[pdf] getDocument فشل:", errorName, (error as Error)?.message);
+    if (errorName === "PasswordException") {
+      throw new PdfImportError(
+        "الملف محمي بكلمة مرور. أزل الحماية منه أولًا ثم استورده."
+      );
+    }
     throw new PdfImportError("هذا الملف ليس PDF صالحًا أو تالف.");
   }
 
@@ -80,16 +105,24 @@ export async function importPdfPages(file: File): Promise<ImportedPdfPage[]> {
       canvas.width = Math.round(renderViewport.width);
       canvas.height = Math.round(renderViewport.height);
       const ctx = canvas.getContext("2d");
-      if (!ctx) continue;
+      if (!ctx) throw new Error("تعذّر إنشاء سطح الرسم");
 
       await page.render({ canvasContext: ctx, canvas, viewport: renderViewport })
         .promise;
 
+      const image = await canvasToBlob(canvas);
+      // نحرّر ذاكرة الكانفا فورًا: على التابلت تجميع كانفاسات مرسومة هو اللي
+      // كان بيقفل المتصفح مع الملفات الطويلة.
+      canvas.width = 0;
+      canvas.height = 0;
+      page.cleanup();
+
       pages.push({
         width: basePoints.width,
         height: basePoints.height,
-        backgroundDataUrl: canvas.toDataURL("image/jpeg", JPEG_QUALITY),
+        image,
       });
+      options.onProgress?.(pageNumber, doc.numPages);
 
       // تنفّس بين كل صفحة وأخرى حتى لا يتجمّد المتصفح أو يعتبر الصفحة
       // متوقفة عن الاستجابة أثناء معالجة ملفات كبيرة.
