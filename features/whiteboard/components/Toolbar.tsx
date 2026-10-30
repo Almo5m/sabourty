@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react";
 import { Icon, IconName } from "@/features/shared/icons/Icon";
 import { colorWithAlpha } from "../lib/color";
+import { NoteStyle } from "../objects/controller";
+import { NotePreview } from "./NotePreview";
+import { NOTE_COLORS, NOTE_LOOKS } from "../objects/nodeLooks";
 import {
   HIGHLIGHT_PALETTE,
   INK_PALETTE,
@@ -31,20 +34,29 @@ const DRAW_TOOLS: ToolButtonDef[] = [
 
 const INSERT_TOOLS: ToolButtonDef[] = [
   { tool: "text", label: "نص", icon: "text" },
-  { tool: "sticky", label: "ملاحظة لاصقة", icon: "sticky" },
   { tool: "voice", label: "ملاحظة صوتية", icon: "voice" },
 ];
 
 const SHAPE_TOOLS: ToolButtonDef[] = [
   { tool: "rectangle", label: "مستطيل", icon: "rectangle" },
+  { tool: "rounded", label: "مستطيل مدوّر", icon: "rounded" },
+  { tool: "pill", label: "كبسولة", icon: "pill" },
   { tool: "circle", label: "دائرة", icon: "circle" },
+  { tool: "diamond", label: "معيّن", icon: "diamond" },
   { tool: "triangle", label: "مثلث", icon: "triangle" },
-  { tool: "line", label: "خط", icon: "line" },
-  { tool: "arrow", label: "سهم", icon: "arrow" },
+  { tool: "hexagon", label: "سداسي", icon: "hexagon" },
+  { tool: "parallelogram", label: "متوازي أضلاع", icon: "parallelogram" },
   { tool: "star", label: "نجمة", icon: "star" },
 ];
 
-type Popover = "shapes" | "style" | null;
+const CONNECTOR_TOOLS: ToolButtonDef[] = [
+  { tool: "line", label: "خط", icon: "line" },
+  { tool: "arrow", label: "سهم", icon: "arrow" },
+  { tool: "elbow", label: "سهم متعرّج", icon: "elbow" },
+  { tool: "curve", label: "سهم منحني", icon: "curve" },
+];
+
+type Popover = "shapes" | "notes" | "style" | null;
 
 interface ToolbarProps {
   activeTool: ToolType;
@@ -58,6 +70,8 @@ interface ToolbarProps {
   onExportPNG: () => void;
   onExportPDF: () => void;
   isPdfMode: boolean;
+  noteStyle: NoteStyle;
+  onNoteStyleChange: (style: NoteStyle) => void;
   onOpenVoiceNotes: () => void;
   onOpenTemplates: () => void;
   onOpenVideoExport: () => void;
@@ -235,6 +249,49 @@ function StylePanel({
   );
 }
 
+function NotePanel({
+  style,
+  onChange,
+}: {
+  style: NoteStyle;
+  onChange: (style: NoteStyle) => void;
+}) {
+  return (
+    <div className="w-[300px] max-w-full space-y-3 rounded-2xl border border-border bg-surface p-3 shadow-panel-lg">
+      <div className="grid grid-cols-5 gap-1.5">
+        {NOTE_LOOKS.map((look) => (
+          <button
+            key={look.id}
+            onClick={() => onChange({ ...style, look: look.id })}
+            aria-label={`ملاحظة ${look.label}`}
+            title={look.label}
+            className={`flex flex-col items-center gap-1 rounded-xl p-1.5 text-[10px] text-ink-soft transition ${
+              style.look === look.id ? "bg-accent-soft ring-2 ring-accent/50" : "hover:bg-paper"
+            }`}
+          >
+            <NotePreview look={look.id} fill={style.fill} accent={style.accent} />
+            {look.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {NOTE_COLORS.map((color) => (
+          <button
+            key={color.fill}
+            title={color.label}
+            aria-label={`لون ${color.label}`}
+            onClick={() => onChange({ ...style, fill: color.fill, accent: color.accent })}
+            className={`h-8 w-8 rounded-full border transition ${
+              style.fill === color.fill ? "scale-110 border-ink ring-2 ring-accent/40" : "border-border-strong hover:scale-105"
+            }`}
+            style={{ background: color.fill }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function Toolbar({
   activeTool,
   onToolChange,
@@ -247,6 +304,8 @@ export function Toolbar({
   onExportPNG,
   onExportPDF,
   isPdfMode,
+  noteStyle,
+  onNoteStyleChange,
   onOpenVoiceNotes,
   onOpenTemplates,
   onOpenVideoExport,
@@ -274,8 +333,22 @@ export function Toolbar({
     return () => window.removeEventListener("keydown", onKey);
   }, [popover, moreOpen]);
 
+  // أي ضغطة برّه الأشرطة والقوائم بتقفل القوائم المنبثقة، ومن غير ما نبلع الضغطة
+  // (فالضغطة نفسها بتوصل للكانفا وتبدأ الرسم)
+  useEffect(() => {
+    if (!popover && !moreOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!(e.target as Element | null)?.closest("[data-toolbar-surface]")) {
+        setPopover(null);
+        setMoreOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+  }, [popover, moreOpen]);
+
   const hasProperties = TOOLS_WITH_PROPERTIES.includes(activeTool);
-  const activeShape = SHAPE_TOOLS.find((t) => t.tool === activeTool);
+  const activeShape = [...SHAPE_TOOLS, ...CONNECTOR_TOOLS].find((t) => t.tool === activeTool);
   const showSelectionActions =
     activeTool === "select" && (canGroup || canUngroup);
 
@@ -297,25 +370,24 @@ export function Toolbar({
 
   return (
     <>
-      {(popover || moreOpen) && (
-        <button
-          aria-label="إغلاق"
-          className="absolute inset-0 z-10 cursor-default"
-          onClick={() => {
-            setPopover(null);
-            setMoreOpen(false);
-          }}
-        />
-      )}
-
       {/* الشريط الرئيسي للأدوات */}
       <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-3">
-        <div className="pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto rounded-2xl border border-border bg-surface px-1.5 py-1.5 shadow-panel">
+        <div data-toolbar-surface className="pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto rounded-2xl border border-border bg-surface px-1.5 py-1.5 shadow-panel">
           {renderTools(NAVIGATE_TOOLS)}
           <Divider />
           {renderTools(DRAW_TOOLS)}
           <Divider />
-          {renderTools(INSERT_TOOLS)}
+          {renderTools(INSERT_TOOLS.slice(0, 1))}
+          <IconButton
+            icon="sticky"
+            label="ملاحظة"
+            active={activeTool === "sticky" || popover === "notes"}
+            onClick={() => {
+              onToolChange("sticky");
+              setPopover((p) => (p === "notes" ? null : "notes"));
+            }}
+          />
+          {renderTools(INSERT_TOOLS.slice(1))}
           <Divider />
           <IconButton
             icon={activeShape?.icon ?? "shapes"}
@@ -350,17 +422,27 @@ export function Toolbar({
 
       {/* قائمة الأشكال */}
       {popover === "shapes" && (
-        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-30 flex justify-center px-3">
-          <div className="pointer-events-auto grid grid-cols-6 gap-1 rounded-2xl border border-border bg-surface p-1.5 shadow-panel-lg">
-            {renderTools(SHAPE_TOOLS)}
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-40 flex justify-center px-3">
+          <div data-toolbar-surface className="pointer-events-auto space-y-1 rounded-2xl border border-border bg-surface p-1.5 shadow-panel-lg">
+            <div className="grid grid-cols-5 gap-1">{renderTools(SHAPE_TOOLS)}</div>
+            <div className="mx-1 h-px bg-border" />
+            <div className="grid grid-cols-5 gap-1">{renderTools(CONNECTOR_TOOLS)}</div>
+          </div>
+        </div>
+      )}
+
+      {popover === "notes" && (
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-40 flex justify-center px-3">
+          <div data-toolbar-surface className="pointer-events-auto">
+            <NotePanel style={noteStyle} onChange={onNoteStyleChange} />
           </div>
         </div>
       )}
 
       {/* اللون / الحجم / الشفافية */}
       {popover === "style" && hasProperties && (
-        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-30 flex justify-center px-3">
-          <div className="pointer-events-auto">
+        <div className="pointer-events-none absolute inset-x-0 top-[72px] z-40 flex justify-center px-3">
+          <div data-toolbar-surface className="pointer-events-auto">
             <StylePanel
               tool={activeTool}
               settings={settings}
@@ -397,7 +479,7 @@ export function Toolbar({
       )}
 
       {/* عنقود الإجراءات الثانوية */}
-      <div className="pointer-events-none absolute end-4 top-[68px] z-20 flex items-start gap-2 xl:top-4">
+      <div data-toolbar-surface className="pointer-events-none absolute end-4 top-[68px] z-20 flex items-start gap-2 xl:top-4">
         <div className="pointer-events-auto flex items-center gap-1 rounded-2xl border border-border bg-surface p-1.5 shadow-panel">
           <IconButton
             icon="layers"

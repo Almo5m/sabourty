@@ -1,4 +1,8 @@
 import * as fabric from "fabric";
+import { ConnectorObject } from "../objects/connector";
+import { makeConnector, makeNode } from "../objects/factory";
+import { NodeObject } from "../objects/node";
+import { NOTE_COLORS } from "../objects/nodeLooks";
 import type { IconName } from "@/features/shared/icons/Icon";
 
 export type TemplateId =
@@ -50,108 +54,76 @@ export const TEMPLATES: TemplateInfo[] = [
 
 const TOKEN = {
   accent: "#1f6f63",
-  accentSoft: "#e3efec",
   amber: "#d98c3b",
   ink: "#211f1a",
-  paper: "#faf9f5",
-  line: "#c8c1af",
+  line: "#9b937c",
 };
 
 type Variant = "accent" | "soft" | "amber";
 
-const VARIANT_STYLE: Record<Variant, { fill: string; text: string }> = {
-  accent: { fill: TOKEN.accent, text: TOKEN.paper },
-  soft: { fill: TOKEN.accentSoft, text: TOKEN.ink },
-  amber: { fill: TOKEN.amber, text: TOKEN.paper },
+const VARIANT_FILL: Record<Variant, string> = {
+  accent: TOKEN.accent,
+  soft: "#e3efec",
+  amber: TOKEN.amber,
 };
 
-function tagObject(obj: fabric.Object, name: string) {
-  const anyObj = obj as fabric.Object & { id?: string; name?: string };
-  anyObj.id = crypto.randomUUID();
-  anyObj.name = name;
+interface NodeOptions {
+  look?: NodeObject["look"];
+  shape?: NodeObject["shape"];
+  fill?: string;
+  bold?: boolean;
+  fontSize?: number;
+  name?: string;
 }
 
-/**
- * عقدة = مستطيل + نص، ككائنين مستقلّين على مستوى اللوحة (بدون تجميع Group)
- * حتى تبقى الكتابة داخل النص تعمل بشكل طبيعي عبر آلية فابريك الأصلية
- * للنقر المزدوج على النص (وهي آلية لا تعمل مع نص متداخل داخل مجموعة).
- */
-function createNode(
+/** عقدة قالب: شكل + نص مربوط ككائن واحد (بدل مستطيل ونص منفصلين). */
+function node(
   text: string,
-  left: number,
-  top: number,
+  cx: number,
+  cy: number,
   width: number,
   height: number,
   variant: Variant,
-  name = "عقدة"
-): [fabric.Rect, fabric.Textbox] {
-  const style = VARIANT_STYLE[variant];
-  const rect = new fabric.Rect({
-    left,
-    top,
+  options: NodeOptions = {}
+): NodeObject {
+  return makeNode({
+    left: cx - width / 2,
+    top: cy - height / 2,
     width,
     height,
-    fill: style.fill,
-    rx: 14,
-    ry: 14,
-    stroke: "rgba(33, 31, 26, 0.06)",
-    strokeWidth: 1,
-    shadow: new fabric.Shadow({
-      color: "rgba(33, 31, 26, 0.12)",
-      blur: 7,
-      offsetY: 2,
-    }),
-  });
-  const textbox = new fabric.Textbox(text, {
-    left: left + 10,
-    top: top + height / 2 - 10,
-    width: width - 20,
-    fontSize: 14,
-    fill: style.text,
+    look: options.look ?? "flat",
+    shape: options.shape ?? "rounded",
+    fill: options.fill ?? VARIANT_FILL[variant],
+    stroke: TOKEN.accent,
+    cornerRadius: 16,
+    label: text,
+    fontSize: options.fontSize ?? 16,
+    fontWeight: options.bold ? "bold" : "normal",
     textAlign: "center",
+    verticalAlign: "middle",
+    meta: { name: options.name ?? "عقدة", kind: "rectangle" },
   });
-  tagObject(rect, name);
-  tagObject(textbox, `${name} (نص)`);
-  return [rect, textbox];
 }
 
-function createCircle(x: number, y: number, radius: number, variant: Variant) {
-  const style = VARIANT_STYLE[variant];
-  const circle = new fabric.Circle({
-    left: x - radius,
-    top: y - radius,
-    radius,
-    fill: style.fill,
-    stroke: TOKEN.paper,
-    strokeWidth: 2,
-  });
-  tagObject(circle, "نقطة");
-  return circle;
-}
-
-function createLine(x1: number, y1: number, x2: number, y2: number) {
-  const line = new fabric.Line([x1, y1, x2, y2], {
+function link(
+  from: NodeObject | { x: number; y: number },
+  to: NodeObject | { x: number; y: number },
+  route: ConnectorObject["route"] = "straight",
+  options: { arrow?: boolean; sides?: [string, string] } = {}
+): ConnectorObject {
+  const end = (target: NodeObject | { x: number; y: number }, side?: string) =>
+    target instanceof NodeObject
+      ? { node: target, side: (side as never) ?? "auto" }
+      : { point: target };
+  return makeConnector({
+    from: end(from, options.sides?.[0]),
+    to: end(to, options.sides?.[1]),
+    route,
+    endHead: options.arrow ? "arrow" : "none",
     stroke: TOKEN.line,
-    strokeWidth: 2,
+    strokeWidth: 2.5,
+    meta: { name: "خط ربط", kind: "arrow" },
   });
-  tagObject(line, "خط ربط");
-  return line;
-}
-
-/** منحنى رابط ناعم (بدل خط مستقيم) — يُستخدم في الخريطة الذهنية الكلاسيكية. */
-function createCurve(x1: number, y1: number, x2: number, y2: number) {
-  const midX = (x1 + x2) / 2;
-  const midY = (y1 + y2) / 2;
-  const path = new fabric.Path(
-    `M ${x1} ${y1} Q ${midX} ${y1} ${midX} ${midY} Q ${midX} ${y2} ${x2} ${y2}`,
-    {
-      stroke: TOKEN.line,
-      strokeWidth: 2,
-      fill: "",
-    }
-  );
-  tagObject(path, "خط ربط");
-  return path;
 }
 
 export function buildTemplate(
@@ -176,174 +148,139 @@ export function buildTemplate(
 }
 
 function buildMindmap(cx: number, cy: number): fabric.Object[] {
-  const objects: fabric.Object[] = [];
+  const center = node("الفكرة الرئيسية", cx, cy, 190, 76, "accent", {
+    shape: "pill",
+    bold: true,
+    fontSize: 20,
+    name: "الفكرة المركزية",
+  });
   const count = 6;
-  const radius = 220;
-  const subNodes: { x: number; y: number }[] = [];
+  const radiusX = 300;
+  const radiusY = 210;
+  const children: NodeObject[] = [];
   for (let i = 0; i < count; i++) {
     const angle = (Math.PI * 2 * i) / count - Math.PI / 2;
-    subNodes.push({
-      x: cx + radius * Math.cos(angle),
-      y: cy + radius * Math.sin(angle),
-    });
-  }
-
-  subNodes.forEach((p) => {
-    objects.push(createCurve(cx, cy, p.x, p.y));
-  });
-  objects.push(
-    ...createNode(
-      "الفكرة الرئيسية",
-      cx - 75,
-      cy - 30,
-      150,
-      60,
-      "accent",
-      "الفكرة المركزية"
-    )
-  );
-  subNodes.forEach((p, i) => {
-    objects.push(
-      ...createNode(`فكرة فرعية ${i + 1}`, p.x - 60, p.y - 25, 120, 50, "soft")
+    const color = NOTE_COLORS[i % NOTE_COLORS.length];
+    children.push(
+      node(
+        `فكرة فرعية ${i + 1}`,
+        cx + radiusX * Math.cos(angle),
+        cy + radiusY * Math.sin(angle),
+        150,
+        56,
+        "soft",
+        { shape: "pill", fill: color.fill }
+      )
     );
-  });
-
-  return objects;
+  }
+  const links = children.map((child) => link(center, child, "curve"));
+  return [...links, center, ...children];
 }
 
 function buildOrgChart(cx: number, cy: number): fabric.Object[] {
-  const objects: fabric.Object[] = [];
-  const rootTop = cy - 170;
-  const root = { left: cx - 75, top: rootTop, w: 150, h: 50 };
-
-  const midY = cy - 60;
-  const midXs = [cx - 260, cx - 75, cx + 110];
-  const midW = 150;
-  const midH = 50;
-
-  const leafY = cy + 50;
-  const leafW = 140;
-  const leafH = 46;
-
-  midXs.forEach((mx) => {
-    objects.push(createLine(cx, rootTop + root.h, mx + midW / 2, midY));
+  const root = node("الإدارة العليا", cx, cy - 150, 180, 58, "accent", {
+    look: "card",
+    shape: "rounded",
+    fill: "#ffffff",
+    bold: true,
   });
-  midXs.forEach((mx) => {
-    objects.push(createLine(mx + midW / 2, midY + midH, mx + midW / 2, leafY));
-  });
-
-  objects.push(
-    ...createNode("الإدارة العليا", root.left, root.top, root.w, root.h, "accent")
+  const midXs = [cx - 260, cx, cx + 260];
+  const mids = midXs.map((x, i) =>
+    node(`قسم ${i + 1}`, x, cy - 20, 160, 54, "soft", { look: "card", fill: "#ffffff" })
   );
-  midXs.forEach((mx, i) => {
-    objects.push(...createNode(`قسم ${i + 1}`, mx, midY, midW, midH, "soft"));
-  });
-  midXs.forEach((mx, i) => {
-    objects.push(
-      ...createNode(
-        `فريق ${i + 1}`,
-        mx + midW / 2 - leafW / 2,
-        leafY,
-        leafW,
-        leafH,
-        "soft"
-      )
-    );
-  });
-
-  return objects;
+  const leaves = midXs.map((x, i) =>
+    node(`فريق ${i + 1}`, x, cy + 110, 150, 48, "soft", {
+      look: "flat",
+      fill: NOTE_COLORS[i].fill,
+    })
+  );
+  const links = [
+    ...mids.map((m) => link(root, m, "elbow", { sides: ["bottom", "top"] })),
+    ...mids.map((m, i) => link(m, leaves[i], "elbow", { sides: ["bottom", "top"] })),
+  ];
+  return [...links, root, ...mids, ...leaves];
 }
 
 function buildTimeline(cx: number, cy: number): fabric.Object[] {
-  const objects: fabric.Object[] = [];
-  const spineStart = cx - 320;
-  const spineEnd = cx + 320;
+  const spineStart = cx - 340;
+  const spineEnd = cx + 340;
   const count = 5;
   const step = (spineEnd - spineStart) / (count - 1);
-  const nodeW = 120;
-  const nodeH = 44;
-
-  objects.push(createLine(spineStart, cy, spineEnd, cy));
-
+  const objects: fabric.Object[] = [];
+  const spine = makeConnector({
+    from: { point: { x: spineStart - 30, y: cy } },
+    to: { point: { x: spineEnd + 30, y: cy } },
+    route: "straight",
+    endHead: "triangle",
+    stroke: TOKEN.line,
+    strokeWidth: 3,
+    meta: { name: "خط زمني", kind: "arrow" },
+  });
+  objects.push(spine);
+  const nodes: NodeObject[] = [];
   for (let i = 0; i < count; i++) {
     const x = spineStart + step * i;
     const above = i % 2 === 0;
-    const labelY = above ? cy - 90 : cy + 46;
-    objects.push(createLine(x, cy, x, above ? cy - 44 : cy + 44));
-    objects.push(createCircle(x, cy, 9, "accent"));
-    objects.push(
-      ...createNode(`الحدث ${i + 1}`, x - nodeW / 2, labelY, nodeW, nodeH, "soft")
-    );
+    const dot = makeNode({
+      left: x - 12,
+      top: cy - 12,
+      width: 24,
+      height: 24,
+      shape: "ellipse",
+      fill: TOKEN.accent,
+      stroke: "#ffffff",
+      strokeWidth: 3,
+      meta: { name: "نقطة", kind: "circle" },
+    });
+    const card = node(`الحدث ${i + 1}`, x, above ? cy - 100 : cy + 100, 130, 52, "soft", {
+      look: "card",
+      fill: "#ffffff",
+    });
+    objects.push(link(dot, card, "straight", { sides: [above ? "top" : "bottom", above ? "bottom" : "top"] }));
+    nodes.push(dot, card);
   }
-
-  return objects;
+  return [...objects, ...nodes];
 }
 
 function buildFishbone(cx: number, cy: number): fabric.Object[] {
-  const objects: fabric.Object[] = [];
-  const spineStart = cx - 300;
-  const resultW = 150;
-  const resultH = 60;
-  const spineEnd = cx + 220;
-
-  objects.push(createLine(spineStart, cy, spineEnd, cy));
-  objects.push(
-    ...createNode("النتيجة", spineEnd, cy - resultH / 2, resultW, resultH, "amber")
-  );
-
+  const spineStart = cx - 320;
+  const spineEnd = cx + 200;
+  const result = node("النتيجة", spineEnd + 90, cy, 150, 70, "amber", {
+    shape: "pill",
+    bold: true,
+    fontSize: 18,
+  });
+  const spine = link({ x: spineStart, y: cy }, result, "straight", { arrow: true, sides: ["auto", "left"] });
+  const objects: fabric.Object[] = [spine];
+  const nodes: NodeObject[] = [result];
   const boneCount = 6;
-  const usableLength = spineEnd - spineStart - 40;
-  const labelW = 130;
-  const labelH = 40;
-
+  const usable = spineEnd - spineStart - 40;
   for (let i = 0; i < boneCount; i++) {
-    const x = spineStart + 40 + (usableLength / (boneCount + 1)) * (i + 1);
+    const x = spineStart + 60 + (usable / boneCount) * i;
     const up = i % 2 === 0;
-    const targetY = up ? cy - 95 : cy + 95;
-    const targetX = x - 60;
-
-    objects.push(createLine(x, cy, targetX, targetY));
-    objects.push(
-      ...createNode(
-        `سبب ${i + 1}`,
-        targetX - labelW / 2,
-        up ? targetY - labelH - 4 : targetY + 4,
-        labelW,
-        labelH,
-        "soft"
-      )
-    );
+    const label = node(`سبب ${i + 1}`, x - 70, up ? cy - 130 : cy + 130, 130, 46, "soft", {
+      look: "flat",
+      fill: NOTE_COLORS[i % NOTE_COLORS.length].fill,
+    });
+    objects.push(link({ x, y: cy }, label, "straight", { sides: ["auto", up ? "bottom" : "top"] }));
+    nodes.push(label);
   }
-
-  return objects;
+  return [...objects, ...nodes];
 }
 
 function buildFlowchart(cx: number, cy: number): fabric.Object[] {
-  const objects: fabric.Object[] = [];
-  const steps = ["البداية", "الخطوة 2", "الخطوة 3", "الخطوة 4", "النهاية"];
-  const nodeW = 180;
-  const nodeH = 50;
-  const gap = 90;
-  const startY = cy - ((steps.length - 1) * gap) / 2 - nodeH / 2;
-
-  const variants: Variant[] = ["accent", "soft", "soft", "soft", "amber"];
-
-  const positions = steps.map((_, i) => ({
-    left: cx - nodeW / 2,
-    top: startY + i * gap,
-  }));
-
-  for (let i = 0; i < positions.length - 1; i++) {
-    const y1 = positions[i].top + nodeH;
-    const y2 = positions[i + 1].top;
-    objects.push(createLine(cx, y1, cx, y2));
-  }
-
-  steps.forEach((label, i) => {
-    objects.push(
-      ...createNode(label, positions[i].left, positions[i].top, nodeW, nodeH, variants[i])
-    );
-  });
-
-  return objects;
+  const gap = 100;
+  const steps: { text: string; options: NodeOptions; variant: Variant; w: number; h: number }[] = [
+    { text: "البداية", variant: "accent", w: 170, h: 50, options: { shape: "pill", bold: true } },
+    { text: "الخطوة 2", variant: "soft", w: 180, h: 54, options: { look: "card", fill: "#ffffff" } },
+    { text: "قرار؟", variant: "amber", w: 170, h: 100, options: { look: "plain", shape: "diamond", fill: "#fbe3c8" } },
+    { text: "الخطوة 4", variant: "soft", w: 180, h: 54, options: { look: "card", fill: "#ffffff" } },
+    { text: "النهاية", variant: "amber", w: 170, h: 50, options: { shape: "pill", bold: true } },
+  ];
+  const startY = cy - ((steps.length - 1) * (gap + 8)) / 2;
+  const nodes = steps.map((step, i) =>
+    node(step.text, cx, startY + i * (gap + 8), step.w, step.h, step.variant, step.options)
+  );
+  const links = nodes.slice(0, -1).map((n, i) => link(n, nodes[i + 1], "straight", { arrow: true, sides: ["bottom", "top"] }));
+  return [...links, ...nodes];
 }

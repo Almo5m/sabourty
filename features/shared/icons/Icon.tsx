@@ -4,6 +4,19 @@ export type IconName =
   | "select"
   | "hand"
   | "shapes"
+  | "rounded"
+  | "pill"
+  | "diamond"
+  | "hexagon"
+  | "parallelogram"
+  | "elbow"
+  | "alignLeft"
+  | "alignCenter"
+  | "alignRight"
+  | "vTop"
+  | "vMiddle"
+  | "vBottom"
+  | "curve"
   | "fit"
   | "pages"
   | "check"
@@ -134,6 +147,57 @@ function paths(name: IconName) {
           <rect x="3.8" y="11.5" width="8.2" height="8.2" rx="1.6" {...SOFT} />
           <circle cx="16" cy="8" r="4.2" />
           <path d="M14.2 19.7 17.6 13l3.4 6.7h-6.8Z" />
+        </>
+      );
+    case "rounded":
+      return <rect x="3.5" y="6" width="17" height="12" rx="4.5" />;
+    case "pill":
+      return <rect x="2.8" y="8" width="18.4" height="8" rx="4" />;
+    case "diamond":
+      return <path d="M12 3.5 20.5 12 12 20.5 3.5 12 12 3.5Z" />;
+    case "hexagon":
+      return <path d="M7.5 5h9l4.5 7-4.5 7h-9L3 12l4.5-7Z" />;
+    case "parallelogram":
+      return <path d="M7.5 6H21l-4.5 12H3L7.5 6Z" />;
+    case "elbow":
+      return (
+        <>
+          <path d="M4 18V9a3 3 0 0 1 3-3h9" />
+          <path d="m13 3 3.5 3L13 9" />
+        </>
+      );
+    case "curve":
+      return (
+        <>
+          <path d="M4 18c0-7 6-3 8-6s1-6 7-6" />
+          <path d="m16 3 3.5 3-3.5 3" />
+        </>
+      );
+    case "alignRight":
+      return <path d="M4 6h16M10 10h10M4 14h16M10 18h10" />;
+    case "alignCenter":
+      return <path d="M4 6h16M7 10h10M4 14h16M7 18h10" />;
+    case "alignLeft":
+      return <path d="M4 6h16M4 10h10M4 14h16M4 18h10" />;
+    case "vTop":
+      return (
+        <>
+          <path d="M4 4h16" />
+          <rect x="8" y="8" width="8" height="10" rx="1.5" {...SOFT} />
+        </>
+      );
+    case "vMiddle":
+      return (
+        <>
+          <path d="M4 12h2M18 12h2" />
+          <rect x="8" y="6" width="8" height="12" rx="1.5" {...SOFT} />
+        </>
+      );
+    case "vBottom":
+      return (
+        <>
+          <path d="M4 20h16" />
+          <rect x="8" y="6" width="8" height="10" rx="1.5" {...SOFT} />
         </>
       );
     case "fit":

@@ -9,6 +9,13 @@ export type ToolType =
   | "sticky"
   | "voice"
   | "rectangle"
+  | "rounded"
+  | "pill"
+  | "diamond"
+  | "hexagon"
+  | "parallelogram"
+  | "elbow"
+  | "curve"
   | "circle"
   | "triangle"
   | "line"
@@ -95,9 +102,16 @@ export const TOOLS_WITH_PROPERTIES: ToolType[] = [
   "text",
   "sticky",
   "rectangle",
+  "rounded",
+  "pill",
   "circle",
+  "diamond",
   "triangle",
+  "hexagon",
+  "parallelogram",
+  "star",
   "line",
   "arrow",
-  "star",
+  "elbow",
+  "curve",
 ];

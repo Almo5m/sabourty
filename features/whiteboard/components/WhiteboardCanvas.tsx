@@ -40,6 +40,17 @@ import {
 } from "../lib/viewport";
 import { colorWithAlpha } from "../lib/color";
 import { readImageAsDataUrl } from "../lib/image";
+import {
+  DEFAULT_NOTE_STYLE,
+  DiagramController,
+  InspectorModel,
+  NoteStyle,
+} from "../objects/controller";
+import { InspectorBar } from "./inspector/InspectorBar";
+import { isConnector } from "../objects/connector";
+import { isNode } from "../objects/node";
+import { flattenObjects, syncConnectors } from "../objects/sync";
+import { loadFont } from "../lib/fonts";
 import { buildTemplate, TEMPLATES, TemplateId } from "../lib/templates";
 import {
   applyCanvasAppearance,
@@ -128,6 +139,13 @@ interface WhiteboardCanvasProps {
 function shapeName(tool: ToolType) {
   const map: Record<string, string> = {
     rectangle: "مستطيل",
+    rounded: "مستطيل مدوّر",
+    pill: "كبسولة",
+    diamond: "معيّن",
+    hexagon: "سداسي",
+    parallelogram: "متوازي أضلاع",
+    elbow: "سهم متعرّج",
+    curve: "سهم منحني",
     circle: "دائرة",
     triangle: "مثلث",
     line: "خط",
@@ -154,6 +172,13 @@ const KIND_MAP: Record<ToolType, IconName> = {
   sticky: "sticky",
   voice: "voice",
   rectangle: "rectangle",
+  rounded: "rectangle",
+  pill: "rectangle",
+  diamond: "shapes",
+  hexagon: "shapes",
+  parallelogram: "shapes",
+  elbow: "arrow",
+  curve: "arrow",
   circle: "circle",
   triangle: "triangle",
   line: "line",
@@ -181,7 +206,9 @@ function isEraseProtected(obj: fabric.Object): boolean {
     Boolean(anyObj.groupTag) ||
     Boolean(anyObj.audioNoteId) ||
     anyObj.kind === "voice" ||
-    anyObj.kind === "sticky"
+    anyObj.kind === "sticky" ||
+    isNode(obj) ||
+    isConnector(obj)
   );
 }
 
@@ -265,6 +292,17 @@ async function renderPageOffscreen(
     if (page.json) {
       await staticCanvas.loadFromJSON(page.json as Record<string, unknown>);
     }
+    // الخطوط المستخدمة في الصفحة لازم تتحمّل قبل الرسم، والروابط محتاجة تتحسب هندستها
+    const used = new Set<string>();
+    for (const obj of flattenObjects(staticCanvas.getObjects())) {
+      if (isNode(obj) || obj instanceof fabric.Textbox) used.add(obj.fontFamily);
+    }
+    await Promise.all([...used].map((family) => loadFont(family)));
+    for (const obj of flattenObjects(staticCanvas.getObjects())) {
+      if (isNode(obj)) obj.invalidateText();
+      else if (obj instanceof fabric.Textbox) obj.initDimensions();
+    }
+    syncConnectors(staticCanvas.getObjects());
     staticCanvas.backgroundColor = "#ffffff";
     if (imageUrl) {
       const img = await fabric.FabricImage.fromURL(imageUrl);
@@ -339,6 +377,12 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     total: number;
   } | null>(null);
   const pageSwitchingRef = useRef(false);
+  const diagramRef = useRef<DiagramController | null>(null);
+  const [noteStyle, setNoteStyle] = useState<NoteStyle>(DEFAULT_NOTE_STYLE);
+  // لقطة خصائص العنصر المختار (لوحة الخصائص) + المتحكّم نفسه عشان الواجهة تكلّمه
+  const [inspector, setInspector] = useState<InspectorModel | null>(null);
+  const [diagramController, setDiagramController] =
+    useState<DiagramController | null>(null);
   const keyActionsRef = useRef<{
     goToPage: (index: number) => Promise<void>;
     zoomBy: (factor: number) => void;
@@ -391,7 +435,16 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
   }, [activeTool]);
   useEffect(() => {
     settingsRef.current = settings;
-  }, [settings]);
+    // الأشكال والروابط الجديدة بتاخد لون وسُمك وشفافية الأداة الحالية
+    diagramRef.current?.setToolContext({
+      shape: {
+        stroke: settings.color,
+        strokeWidth: Math.max(1, Math.round(settings.size / 2)),
+        opacity: settings.opacity,
+      },
+      note: noteStyle,
+    });
+  }, [settings, noteStyle]);
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
@@ -521,6 +574,8 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     () => () => {
       const canvas = fabricRef.current;
       if (!canvas) return;
+      // أي لوحة اتحمّلت لازم خطوطها (جوجل) تتحمّل عشان النص يظهر بشكله الصحيح
+      void diagramRef.current?.ensureBoardFonts();
 
       type Tagged = fabric.Object & {
         id?: string;
@@ -745,10 +800,15 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       history.push(JSON.stringify(serializeCanvas(canvas)));
     }
 
-    let isDrawingShape = false;
+    const diagram = new DiagramController(canvas, {
+      onCommit: () => snapshot(),
+      onSelectionChange: setInspector,
+      onEditingChange: () => {},
+      getTool: () => activeToolRef.current,
+    });
+    diagramRef.current = diagram;
+    setDiagramController(diagram);
     let panOrigin: { x: number; y: number } | null = null;
-    let shapeOrigin = { x: 0, y: 0 };
-    let activeShape: fabric.Object | null = null;
 
     const assignMeta = (obj: fabric.Object, tool: ToolType) => {
       const anyObj = obj as fabric.Object & {
@@ -823,104 +883,13 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         return;
       }
 
-      if (tool === "sticky") {
-        // الملاحظة اللاصقة مستطيل ونص كعنصرين مستقلّين (لا تجميع) حتى تعمل
-        // الكتابة المباشرة بالنقر المزدوج بشكل طبيعي عبر فابريك، وتُربط
-        // ببعضها في لوحة الطبقات فقط عبر groupTag مشترك.
-        const stickyTag = crypto.randomUUID();
-        const rect = new fabric.Rect({
-          left: pointer.x,
-          top: pointer.y,
-          width: 180,
-          height: 160,
-          fill: "#faecd9",
-          rx: 12,
-          ry: 12,
-          shadow: new fabric.Shadow({
-            color: "rgba(33, 31, 26, 0.14)",
-            blur: 8,
-            offsetY: 2,
-          }),
-        });
-        const textbox = new fabric.Textbox("ملاحظة...", {
-          left: pointer.x + 12,
-          top: pointer.y + 12,
-          width: 156,
-          fontSize: 16,
-          fill: "#211f1a",
-        });
-
-        [rect, textbox].forEach((obj, i) => {
-          const anyObj = obj as fabric.Object & {
-            id?: string;
-            name?: string;
-            kind?: IconName;
-            groupTag?: string;
-            groupLabel?: string;
-            groupIcon?: IconName;
-          };
-          anyObj.id = crypto.randomUUID();
-          anyObj.name = i === 0 ? "ملاحظة" : "ملاحظة (نص)";
-          anyObj.kind = "sticky";
-          anyObj.groupTag = stickyTag;
-          anyObj.groupLabel = "ملاحظة لاصقة";
-          anyObj.groupIcon = "sticky";
-        });
-
-        canvas.add(rect);
-        canvas.add(textbox);
-        snapshot();
-        setActiveTool("select");
-        return;
-      }
+      if (diagram.pointerDown(tool, { x: pointer.x, y: pointer.y })) return;
 
       if (tool === "voice") {
         pendingPointRef.current = { x: pointer.x, y: pointer.y };
         rerecordTargetRef.current = null;
         setRecorderOpen(true);
         return;
-      }
-
-      const shapeTools: ToolType[] = [
-        "rectangle",
-        "circle",
-        "triangle",
-        "line",
-        "arrow",
-        "star",
-      ];
-      if (shapeTools.includes(tool)) {
-        isDrawingShape = true;
-        shapeOrigin = { x: pointer.x, y: pointer.y };
-        const common = {
-          left: pointer.x,
-          top: pointer.y,
-          fill:
-            tool === "line" || tool === "arrow" ? undefined : "transparent",
-          stroke: s.color,
-          strokeWidth: s.size,
-          opacity: s.opacity,
-        };
-
-        if (tool === "rectangle") {
-          activeShape = new fabric.Rect({ ...common, width: 1, height: 1 });
-        } else if (tool === "circle") {
-          activeShape = new fabric.Ellipse({ ...common, rx: 1, ry: 1 });
-        } else if (tool === "triangle") {
-          activeShape = new fabric.Triangle({ ...common, width: 1, height: 1 });
-        } else if (tool === "line" || tool === "arrow") {
-          activeShape = new fabric.Line(
-            [pointer.x, pointer.y, pointer.x, pointer.y],
-            { stroke: s.color, strokeWidth: s.size, opacity: s.opacity }
-          );
-        } else if (tool === "star") {
-          activeShape = createStar(pointer.x, pointer.y, 1, s.color, s.size, s.opacity);
-        }
-
-        if (activeShape) {
-          assignMeta(activeShape, tool);
-          canvas.add(activeShape);
-        }
       }
     };
 
@@ -944,43 +913,8 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         return;
       }
 
-      if (!isDrawingShape || !activeShape) return;
-      const pointer = canvas.getScenePoint(opt.e);
-      const width = pointer.x - shapeOrigin.x;
-      const height = pointer.y - shapeOrigin.y;
-
-      if (activeShape.type === "rect" || activeShape.type === "triangle") {
-        activeShape.set({
-          left: width < 0 ? pointer.x : shapeOrigin.x,
-          top: height < 0 ? pointer.y : shapeOrigin.y,
-          width: Math.abs(width),
-          height: Math.abs(height),
-        });
-      } else if (activeShape.type === "ellipse") {
-        (activeShape as fabric.Ellipse).set({
-          left: width < 0 ? pointer.x : shapeOrigin.x,
-          top: height < 0 ? pointer.y : shapeOrigin.y,
-          rx: Math.abs(width) / 2,
-          ry: Math.abs(height) / 2,
-        });
-      } else if (activeShape.type === "line") {
-        (activeShape as fabric.Line).set({ x2: pointer.x, y2: pointer.y });
-      } else if ((activeShape as fabric.Object & { isStar?: boolean }).isStar) {
-        const radius = Math.hypot(width, height);
-        const scaled = createStar(
-          shapeOrigin.x,
-          shapeOrigin.y,
-          Math.max(radius, 1),
-          settingsRef.current.color,
-          settingsRef.current.size,
-          settingsRef.current.opacity
-        );
-        canvas.remove(activeShape);
-        assignMeta(scaled, "star");
-        canvas.add(scaled);
-        activeShape = scaled;
-      }
-      canvas.requestRenderAll();
+      const scenePoint = canvas.getScenePoint(opt.e);
+      diagram.pointerMove({ x: scenePoint.x, y: scenePoint.y });
     };
 
     const onMouseUp = () => {
@@ -997,12 +931,7 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         }
         return;
       }
-      if (isDrawingShape) {
-        isDrawingShape = false;
-        activeShape = null;
-        snapshot();
-        setActiveTool("select");
-      }
+      if (diagram.pointerUp()) setActiveTool("select");
     };
 
     const onPathCreated = (e: { path: fabric.Path }) => {
@@ -1102,6 +1031,8 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       canvas.off("selection:created", onSelectionChanged);
       canvas.off("selection:updated", onSelectionChanged);
       canvas.off("selection:cleared", onSelectionCleared);
+      diagram.dispose();
+      diagramRef.current = null;
       canvas.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1121,15 +1052,28 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
     const freeDrawTools: ToolType[] = ["pen", "spray", "highlighter"];
     const crosshairTools: ToolType[] = [
       "rectangle",
+      "rounded",
+      "pill",
       "circle",
+      "diamond",
       "triangle",
+      "hexagon",
+      "parallelogram",
+      "star",
       "line",
       "arrow",
-      "star",
+      "elbow",
+      "curve",
       "voice",
     ];
     canvas.isDrawingMode = freeDrawTools.includes(activeTool);
     canvas.selection = activeTool === "select";
+    // بنفك تحديد العنصر عند التحويل لأي أداة تانية، وإلا السحب جواه كان بيحرّكه
+    // بدل ما يرسم بالأداة الجديدة.
+    if (activeTool !== "select") {
+      if (diagramRef.current?.editor.isOpen) diagramRef.current.editor.close(true);
+      canvas.discardActiveObject();
+    }
 
     const cursor =
       activeTool === "eraser"
@@ -1360,6 +1304,22 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         } else if (e.key === "-") {
           e.preventDefault();
           keyActionsRef.current.zoomBy(1 / 1.2);
+        }
+        return;
+      }
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const canvas = fabricRef.current;
+        const active = canvas?.getActiveObjects() ?? [];
+        const removable = active.filter(
+          (o) => !(o as fabric.Object & { locked?: boolean }).locked
+        );
+        if (canvas && removable.length > 0) {
+          e.preventDefault();
+          canvas.discardActiveObject();
+          removable.forEach((o) => canvas.remove(o));
+          canvas.requestRenderAll();
+          snapshot();
         }
         return;
       }
@@ -2255,6 +2215,8 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       <Toolbar
         activeTool={activeTool}
         onToolChange={handleToolChange}
+        noteStyle={noteStyle}
+        onNoteStyleChange={setNoteStyle}
         settings={settings}
         onSettingsChange={setSettings}
         onUndo={handleUndo}
@@ -2304,6 +2266,10 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
         onDelete={handleDeleteLayer}
         onReorder={handleReorderLayers}
       />
+
+      {diagramController && inspector && (
+        <InspectorBar diagram={diagramController} model={inspector} />
+      )}
 
       <ZoomControl
         zoom={zoom}
@@ -2371,33 +2337,4 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
       />
     </div>
   );
-}
-
-function createStar(
-  cx: number,
-  cy: number,
-  radius: number,
-  color: string,
-  strokeWidth: number,
-  opacity: number
-) {
-  const points = 5;
-  const outerRadius = radius;
-  const innerRadius = radius / 2.5;
-  const coords: { x: number; y: number }[] = [];
-  for (let i = 0; i < points * 2; i++) {
-    const r = i % 2 === 0 ? outerRadius : innerRadius;
-    const angle = (Math.PI / points) * i - Math.PI / 2;
-    coords.push({ x: r * Math.cos(angle), y: r * Math.sin(angle) });
-  }
-  const star = new fabric.Polygon(coords, {
-    left: cx - outerRadius,
-    top: cy - outerRadius,
-    fill: "transparent",
-    stroke: color,
-    strokeWidth,
-    opacity,
-  });
-  (star as fabric.Object & { isStar?: boolean }).isStar = true;
-  return star;
 }

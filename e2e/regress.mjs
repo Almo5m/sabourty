@@ -35,27 +35,25 @@ ok(Math.abs(r[0] - 400) < 4 && Math.abs(r[1] - 300) < 4 && Math.abs(r[2] - 200) 
 const sel = await page.evaluate(() => window.__canvas.getObjects()[0].cornerColor);
 ok(sel === "#1f6f63", "selection handles use the brand colour");
 
-await tool(page, "ملاحظة لاصقة");
+await tool(page, "ملاحظة"); await page.keyboard.press("Escape");
 await page.mouse.click(800, 450); await sleep(400);
-ok((await panelCount(page)) === 2, "sticky note (rect+text) is ONE layer");
-await page.mouse.click(1100, 700);
-await page.mouse.click(850, 470, { count: 2 }); await sleep(400);
-await page.keyboard.down("Control"); await page.keyboard.press("a"); await page.keyboard.up("Control");
+ok((await panelCount(page)) === 2, "sticky note (shape+text bound) is ONE layer");
+// الملاحظة الجديدة بتفتح محرّر النص فورًا
 await page.keyboard.type("hello"); await sleep(200);
 await page.mouse.click(1100, 700); await sleep(300);
-const texts = await page.evaluate(() => window.__canvas.getObjects().filter((o) => o.type === "textbox").map((o) => o.text));
-ok(texts.includes("hello"), "typing inside a sticky note works");
+const texts = await page.evaluate(() => window.__canvas.getObjects().filter((o) => o.type === "flownode").map((o) => o.label));
+ok(texts.includes("hello"), "typing inside a sticky note works (text bound to the note)");
 
 await tool(page, "القوالب"); await sleep(300);
 await clickByText(page, "button", "خريطة ذهنية"); await sleep(600);
 ok((await panelCount(page)) === 3, "mind-map template adds exactly ONE layer");
-const c = await page.evaluate(() => { const o = window.__canvas.getObjects().find((x) => x.type === "textbox" && x.text.includes("الفكرة الرئيسية")); const p = o.getCenterPoint(); return [Math.round(p.x), Math.round(p.y)]; });
+const c = await page.evaluate(() => { const o = window.__canvas.getObjects().find((x) => x.type === "flownode" && x.label.includes("الفكرة الرئيسية")); const p = o.getCenterPoint(); return [Math.round(p.x), Math.round(p.y)]; });
 await tool(page, "تحديد"); await page.mouse.click(1200, 100);
 await page.mouse.click(c[0], c[1], { count: 2 }); await sleep(400);
-await page.keyboard.down("Control"); await page.keyboard.press("a"); await page.keyboard.up("Control");
+await page.evaluate(() => document.querySelector("[data-node-editor]").select());
 await page.keyboard.type("MYIDEA"); await sleep(200);
 await page.mouse.click(1200, 100); await sleep(300);
-ok((await page.evaluate(() => window.__canvas.getObjects().some((o) => o.text === "MYIDEA"))), "typing inside a mind-map node works");
+ok((await page.evaluate(() => window.__canvas.getObjects().some((o) => o.label === "MYIDEA"))), "typing inside a mind-map node works");
 
 // ───────── الطبقات
 const trash = await page.evaluate(() => getComputedStyle(document.querySelector('[title="حذف"]').parentElement).opacity);
@@ -64,13 +62,13 @@ ok(trash === "1", "layer delete button is always visible (no hover needed)");
 // ───────── الممحاة
 await newBoard(page);
 await tool(page, "قلم حر"); await stroke(page, 450, 350, 650, 350);
-await tool(page, "ملاحظة لاصقة"); await page.mouse.click(800, 450); await sleep(300);
+await tool(page, "ملاحظة"); await page.keyboard.press("Escape"); await page.mouse.click(800, 450); await sleep(300);
 await tool(page, "ممحاة");
 await page.mouse.move(430, 350); await page.mouse.down();
 for (let i = 0; i <= 20; i++) await page.mouse.move(430 + i * 12, 350);
 await page.mouse.move(850, 520); await page.mouse.move(900, 520);
 await page.mouse.up(); await sleep(400);
-ok((await objects(page)) === 2, "eraser deletes the stroke but never the sticky note");
+ok(await page.evaluate(() => { const all = window.__canvas.getObjects(); return all.filter((o) => o.type === "path").length === 0 && all.some((o) => o.type === "flownode" && o.look === "sticky"); }), "eraser deletes the stroke but never the sticky note");
 
 // ───────── لوحة التحكم (الداشبورد)
 await page.goto(BASE, { waitUntil: "networkidle0" });
@@ -100,11 +98,11 @@ for (let i = 1; i <= 6; i++) await touch("touchMove", [[300 + i * 20, 650]]);
 await touch("touchEnd", []); await sleep(300);
 ok((await objects(page)) === n0 + 1, "pen still draws after a pinch");
 await page.evaluate(() => window.__canvas.setViewportTransform([1, 0, 0, 1, 0, 0]));
-await tool(page, "ملاحظة لاصقة"); await page.mouse.click(900, 200); await sleep(300);
+await tool(page, "ملاحظة"); await page.keyboard.press("Escape"); await page.mouse.click(900, 200); await sleep(300);
 await tool(page, "تحديد"); await page.mouse.click(1100, 700);
 for (let i = 0; i < 2; i++) { await touch("touchStart", [[950, 220]]); await sleep(40); await touch("touchEnd", []); await sleep(120); }
 await sleep(300);
-ok(await page.evaluate(() => !!window.__canvas.getActiveObject()?.isEditing), "tap (select) then tap (edit) opens text editing on touch");
+ok(await page.evaluate(() => getComputedStyle(document.querySelector("[data-node-editor]")).display !== "none"), "tap (select) then tap (edit) opens text editing on touch");
 
 // ───────── PDF
 const doc = await PDFDocument.create(); const font = await doc.embedFont(StandardFonts.HelveticaBold);
