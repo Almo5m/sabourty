@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node regress.mjs",
     "test:pdf": "node pdf-and-pen.mjs",
-    "test:diagram": "node diagram.mjs && node diagram-inspector.mjs && node diagram-connect.mjs",
+    "test:diagram": "node diagram.mjs && node diagram-inspector.mjs && node diagram-connect.mjs && node diagram-ux.mjs",
     "test:migration": "node legacy-migration.mjs",
     "test:replay": "node replay-content.mjs",
     "test:video": "node video-check.mjs"

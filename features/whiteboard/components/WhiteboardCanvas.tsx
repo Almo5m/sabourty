@@ -1852,6 +1852,9 @@ export function WhiteboardCanvas({ board }: WhiteboardCanvasProps) {
 
     canvas.renderAll();
     setTemplatesOpen(false);
+    // بعد إدراج القالب نرجع لأداة التحديد، وإلا النقر على العقدة (للكتابة فيها)
+    // كان بيرسم بالقلم بدل ما يفتح التحرير.
+    setActiveTool("select");
     snapshot();
   };
 

@@ -173,27 +173,43 @@ interface InspectorBarProps {
  */
 export function InspectorBar({ diagram, model }: InspectorBarProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [panel, setPanel] = useState<Panel>(null);
   const toggle = (next: Panel) => setPanel((p) => (p === next ? null : next));
 
-  // تتبّع موضع العنصر: بنحرّك الحاوية مباشرة (بدون state) عشان ما نعيد رسم React كل إطار
+  // تتبّع موضع العنصر: بنحرّك الحاوية مباشرة (بدون state) عشان ما نعيد رسم React كل إطار.
+  // الموضع بيتحسب من ارتفاع الشريط بس، والقوائم المنبثقة بتتفتح مطلقة تحته أو فوقه
+  // من غير ما تحرّك الشريط نفسه.
   useLayoutEffect(() => {
     const place = () => {
       const wrap = wrapRef.current;
+      const bar = barRef.current;
       const rect = diagram.getAnchorRect();
-      if (!wrap || !rect) return;
+      if (!wrap || !bar || !rect) return;
       const view = diagram.getViewSize();
-      const w = wrap.offsetWidth;
-      const h = wrap.offsetHeight;
+      const w = bar.offsetWidth;
+      const h = bar.offsetHeight;
       const centerX = (rect.left + rect.right) / 2;
       const x = Math.min(Math.max(centerX - w / 2, 8), Math.max(view.width - w - 8, 8));
-      // بتفضل تحت الأشرطة العلوية (y >= 84) وفوق متنقّل الصفحات والزوم
+      // بتفضل تحت الأشرطة العلوية وفوق متنقّل الصفحات والزوم
       const topSafe = 84;
+      const bottomSafe = view.height - 84;
       let y = rect.top - h - 16;
       if (y < topSafe) y = rect.bottom + 16;
-      y = Math.min(y, view.height - h - 84);
-      y = Math.max(y, topSafe);
+      y = Math.max(Math.min(y, bottomSafe - h), topSafe);
       wrap.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+
+      const panelEl = panelRef.current;
+      if (panelEl) {
+        const pw = panelEl.offsetWidth;
+        const ph = panelEl.offsetHeight;
+        const below = y + h + 8 + ph <= view.height - 8;
+        const left = Math.min(Math.max(x + w / 2 - pw / 2, 8), Math.max(view.width - pw - 8, 8));
+        panelEl.style.left = `${Math.round(left - x)}px`;
+        panelEl.style.top = below ? `${h + 8}px` : "";
+        panelEl.style.bottom = below ? "" : `${h + 8}px`;
+      }
     };
     place();
     return diagram.onRender(place);
@@ -389,10 +405,13 @@ export function InspectorBar({ diagram, model }: InspectorBarProps) {
   })();
 
   return (
-    <div ref={wrapRef} className="pointer-events-none absolute left-0 top-0 z-30 flex flex-col items-center gap-2" style={{ width: "max-content", maxWidth: "min(96vw, 720px)" }}>
-      <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-0.5 rounded-2xl border border-border bg-surface p-1 shadow-panel" role="toolbar" aria-label="خصائص العنصر">
+    <div ref={wrapRef} className="pointer-events-none absolute left-0 top-0 z-30" style={{ width: "max-content", maxWidth: "min(96vw, 720px)" }}>
+      <div ref={barRef} className="pointer-events-auto flex flex-wrap items-center justify-center gap-0.5 rounded-2xl border border-border bg-surface p-1 shadow-panel" role="toolbar" aria-label="خصائص العنصر">
         {node && (
           <>
+            <Btn label="تعديل النص" onClick={() => diagram.editSelectedNode()}>
+              <Icon name="text" size={18} />
+            </Btn>
             <Btn label="الشكل" active={panel === "shape"} onClick={() => toggle("shape")}>
               <Icon name={SHAPE_ICON[node.shape]} size={18} />
             </Btn>
@@ -450,7 +469,11 @@ export function InspectorBar({ diagram, model }: InspectorBarProps) {
           </>
         )}
       </div>
-      {panelBody && <div className="pointer-events-auto">{panelBody}</div>}
+      {panelBody && (
+        <div ref={panelRef} className="pointer-events-auto absolute" style={{ top: 0 }}>
+          {panelBody}
+        </div>
+      )}
     </div>
   );
 }

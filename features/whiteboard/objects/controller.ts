@@ -209,6 +209,7 @@ export class DiagramController {
 
     canvas.on("before:render", this.sync);
     canvas.on("after:render", this.paintOverlay);
+    canvas.on("mouse:down:before", this.onMouseDownBefore);
     canvas.on("mouse:up", this.onMouseUp);
     canvas.on("mouse:dblclick", this.onDoubleClick);
     canvas.on("selection:created", this.onSelection);
@@ -235,6 +236,7 @@ export class DiagramController {
   dispose() {
     this.canvas.off("before:render", this.sync);
     this.canvas.off("after:render", this.paintOverlay);
+    this.canvas.off("mouse:down:before", this.onMouseDownBefore);
     this.canvas.off("mouse:up", this.onMouseUp);
     this.canvas.off("mouse:dblclick", this.onDoubleClick);
     this.canvas.off("selection:created", this.onSelection);
@@ -367,6 +369,13 @@ export class DiagramController {
 
   private onModified = () => this.notifySelection();
 
+  /** العقدة اللي كانت مختارة قبل الضغطة (عشان النقرة على المختارة تفتح التحرير). */
+  private selectedBeforeDown: fabric.FabricObject | undefined;
+
+  private onMouseDownBefore = () => {
+    this.selectedBeforeDown = this.canvas.getActiveObject();
+  };
+
   private onMouseUp = (opt: { target?: fabric.FabricObject; isClick?: boolean; e: fabric.TPointerEvent }) => {
     if (this.hooks.getTool() !== "select") return;
     const target = opt.target;
@@ -378,7 +387,13 @@ export class DiagramController {
     const now = Date.now();
     const id = getNodeId(target);
     const tap = this.lastTap;
-    if (tap && tap.id === id && now - tap.time < 400 && Math.hypot(point.x - tap.x, point.y - tap.y) < 14 / this.canvas.getZoom()) {
+    // نقرة على عقدة مختارة بالفعل = تعديل النص (بتشتغل بسهولة على اللمس)
+    if (this.selectedBeforeDown === target) {
+      this.lastTap = null;
+      this.editNode(target);
+      return;
+    }
+    if (tap && tap.id === id && now - tap.time < 600 && Math.hypot(point.x - tap.x, point.y - tap.y) < 24 / this.canvas.getZoom()) {
       this.lastTap = null;
       this.editNode(target);
     } else {
@@ -403,7 +418,8 @@ export class DiagramController {
     }
   };
 
-  editNode(node: NodeObject, selectAll = false) {
+  /** يفتح التحرير ويحدد النص كله (الكتابة بتستبدله، والأسهم/النقر بتلغي التحديد). */
+  editNode(node: NodeObject, selectAll = true) {
     this.canvas.setActiveObject(node);
     this.editor.open(node, selectAll);
   }
@@ -787,12 +803,39 @@ export class DiagramController {
     return model;
   }
 
-  /** مستطيل العنصر المختار بإحداثيات الشاشة (لتحديد مكان لوحة الخصائص). */
+  /**
+   * مستطيل العنصر المختار بإحداثيات الشاشة (لتحديد مكان لوحة الخصائص).
+   * getBoundingRect بيرجّع إحداثيات اللوحة الخام، فلازم نطبّق التكبير والتحريك بإيدينا.
+   * الرابط بيتمثّل بنقطة منتصفه (صندوقه ممكن يبقى ضخم ويبعد اللوحة عن الخط).
+   */
   getAnchorRect(): { left: number; top: number; right: number; bottom: number } | null {
     const active = this.canvas.getActiveObject();
     if (!active) return null;
+    const vpt = this.canvas.viewportTransform;
+    const toScreen = (x: number, y: number) => ({
+      x: x * vpt[0] + y * vpt[2] + vpt[4],
+      y: x * vpt[1] + y * vpt[3] + vpt[5],
+    });
+    if (isConnector(active) && active.routed) {
+      const mid = active.routed.samples[Math.floor(active.routed.samples.length / 2)];
+      const p = toScreen(mid.x, mid.y);
+      return { left: p.x - 10, top: p.y - 10, right: p.x + 10, bottom: p.y + 10 };
+    }
     const r = active.getBoundingRect();
-    return { left: r.left, top: r.top, right: r.left + r.width, bottom: r.top + r.height };
+    const a = toScreen(r.left, r.top);
+    const b = toScreen(r.left + r.width, r.top + r.height);
+    return {
+      left: Math.min(a.x, b.x),
+      top: Math.min(a.y, b.y),
+      right: Math.max(a.x, b.x),
+      bottom: Math.max(a.y, b.y),
+    };
+  }
+
+  /** يفتح محرّر نص العقدة المختارة (زرار "تعديل النص" في لوحة الخصائص). */
+  editSelectedNode() {
+    const node = this.getTargets().nodes[0];
+    if (node) this.editNode(node);
   }
 
   /** اشتراك في كل إعادة رسم (لتتبّع لوحة الخصائص للعنصر). بيرجّع دالة إلغاء الاشتراك. */
